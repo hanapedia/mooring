@@ -15,28 +15,33 @@ mooring eliminates this by moving SNAT to the client pod's own node and decoupli
 - **Shared external IPs** — all nodes advertise every external IP via BGP (ECMP), so any node can handle return traffic.
 - **Rollout-resilient** — BPF programs and maps are pinned to bpffs; in-flight connections survive daemon restarts.
 - **No NAT table collisions** — port ranges are allocated per `(pod, external IP)` pair, making them non-overlapping by construction.
+- **CNI-agnostic by default** — works with any veth-based CNI; Cilium is an optional integration.
 
 ## Requirements
 
-- **Cilium CNI** with BPF host routing enabled (kernel conntrack is bypassed).
 - **BGP underlay** with pod CIDRs advertised natively (overlay networks are not supported).
-- **CiliumDatapathPlugin** API available for BPF attachment to pod endpoints.
+- **Veth-based pod networking** — any CNI that creates a veth pair per pod works out of the box.
+- **Cilium CNI** with BPF host routing and the CiliumDatapathPlugin API are required only when the Cilium integration feature is enabled.
 
 ## How It Works
 
 ### Outbound
 
-The client pod's node performs SNAT using a pre-allocated port range. The BPF program hooks into `cil_from_container`, rewrites the source to `externalIP:NAT-port`, and records the mapping in a per-node NAT table.
+The client pod's node performs SNAT using a pre-allocated port range. A TC egress BPF program on the pod's host-side veth rewrites the source to `externalIP:NAT-port` and records the mapping in a per-node NAT table.
 
 ### Return path (two stages)
 
 Return traffic is distributed across all nodes via BGP ECMP. Processing happens in two hops:
 
-1. **Stage 1 — IP revNAT (any node):** `cil_from_netdev` checks the destination against the external IP pool, resolves the pod IP from the NAT port using a shared port-range lookup map, and rewrites the destination IP. BGP then routes the packet to the pod's node.
+1. **Stage 1 — IP revNAT (any node):** A TC ingress BPF program on the node uplink checks the destination against the external IP pool, resolves the pod IP from the NAT port using a shared port-range lookup map, and rewrites the destination IP. BGP then routes the packet to the pod's node.
 
-2. **Stage 2 — port revNAT (client node):** `cil_to_container` looks up the full NAT table entry and restores the original pod port before delivering to the pod.
+2. **Stage 2 — port revNAT (client node):** A TC ingress BPF program on the host-side veth looks up the full NAT table entry and restores the original pod port before delivering to the pod.
 
 This two-stage split works because port ranges are unique per `(pod, external IP)` pair — the NAT port alone identifies both the pod and which external IP was used, without carrying extra state through the network.
+
+### Conntrack
+
+Kernel conntrack is bypassed for NAT traffic. The daemon installs `iptables -t raw NOTRACK` rules for the external IP pool on startup. mooring's own BPF maps are the authoritative connection state. In Cilium mode this step is skipped because Cilium's BPF host routing already disables conntrack cluster-wide.
 
 ## Architecture
 
@@ -44,23 +49,39 @@ This two-stage split works because port ranges are unique per `(pod, external IP
                ┌──────────────┐
                │  client pod  │
                └──────┬───────┘
-                      │ cil_from_container (SNAT: pod-IP:pod-port → extIP:NAT-port)
+                      │ TC egress — host-side veth (SNAT: pod-IP:pod-port → extIP:NAT-port)
                       ▼
                 BGP routing → external server
 
-     ┌─────────────────────────────────────────────────┐
-     │ Return path                                      │
-     │                                                  │
-     │  external server                                 │
-     │    → any node (ECMP)                             │
-     │    → cil_from_netdev  [Stage 1: IP revNAT]       │
-     │        extIP:NAT-port → pod-IP:NAT-port          │
-     │    → BGP routing to pod's node                   │
-     │    → cil_to_container [Stage 2: port revNAT]     │
-     │        pod-IP:NAT-port → pod-IP:pod-port         │
-     │    → client pod ✓                                │
-     └─────────────────────────────────────────────────┘
+     ┌─────────────────────────────────────────────────────┐
+     │ Return path                                          │
+     │                                                      │
+     │  external server                                     │
+     │    → any node (ECMP)                                 │
+     │    → TC ingress — uplink  [Stage 1: IP revNAT]       │
+     │        extIP:NAT-port → pod-IP:NAT-port              │
+     │    → BGP routing to pod's node                       │
+     │    → TC ingress — host-side veth  [Stage 2: port revNAT] │
+     │        pod-IP:NAT-port → pod-IP:pod-port             │
+     │    → client pod ✓                                    │
+     └─────────────────────────────────────────────────────┘
 ```
+
+## BPF Attachment Modes
+
+### Default (CNI-agnostic)
+
+The daemon attaches TC BPF programs directly via netlink. No CNI plugin API is required.
+
+| Hook | Interface | Direction | Role |
+|---|---|---|---|
+| TC egress | host-side veth | egress | Outbound SNAT |
+| TC ingress | node uplink | ingress | Stage 1: IP revNAT |
+| TC ingress | host-side veth | ingress | Stage 2: port revNAT |
+
+### Cilium integration (optional)
+
+When enabled, the daemon uses the CiliumDatapathPlugin API to attach programs into Cilium's existing datapath hooks (`cil_from_container`, `cil_from_netdev`, `cil_to_container`). Requires Cilium with BPF host routing. This mode is tested as a secondary target.
 
 ## Custom Resources
 
@@ -149,7 +170,8 @@ spec:
 - Watches pods matching Gateway selectors; creates `MasqPortRangeRequest` for new pods.
 - Syncs `MasqPortRange` resources into SNAT config and port-range lookup BPF maps.
 - Runs a BGP speaker that advertises all external IPs from all Gateways.
-- Installs and pins BPF programs (`cil_from_container`, `cil_from_netdev`, `cil_to_container`) via CiliumDatapathPlugin.
+- Attaches TC BPF programs via netlink (default) or CiliumDatapathPlugin (Cilium mode).
+- Installs `iptables -t raw NOTRACK` rules for the external IP pool (default mode only).
 - Performs periodic NAT table cleanup for stale entries.
 
 ## Update Resiliency
@@ -159,5 +181,5 @@ BPF programs and maps are pinned to bpffs at `/sys/fs/bpf/mooring/`. On daemon r
 ## Limitations
 
 - **Max concurrent connections** per pod per external IP is bounded by the assigned port range size. High-churn pods should use a dedicated IP pool with a larger `defaultPortRangeSize`.
-- **Cilium with BPF host routing is required.** Non-Cilium CNI compatibility is not planned.
 - **BGP underlay with native pod routing is required.** Overlay networks are not supported.
+- **Cilium mode** requires Cilium with BPF host routing and CiliumDatapathPlugin. It may have ordering dependencies with other TC programs on the uplink and is tested as a secondary target.

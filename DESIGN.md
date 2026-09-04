@@ -14,12 +14,12 @@ identity from any individual pod or node.
 
 ## Assumptions
 
-- **Cilium CNI** with **BPF host routing** enabled. Kernel conntrack is bypassed; Cilium manages
-  connection tracking in BPF maps.
 - **BGP underlay**: pod CIDRs are advertised via BGP, making pod IPs natively routable across the
   cluster without encapsulation.
-- **CiliumDatapathPlugin** API is available for selective BPF attachment to pod endpoints and for
-  extending `cil_from_netdev`.
+- **Veth-based pod networking**: the CNI creates a veth pair per pod, with the host-side end
+  visible in the root network namespace. This is true of virtually all CNI plugins.
+- **Cilium CNI** with **BPF host routing** and the **CiliumDatapathPlugin** API are required only
+  when the Cilium integration feature is enabled (see [BPF Attachment Modes](#bpf-attachment-modes)).
 
 ---
 
@@ -30,6 +30,7 @@ identity from any individual pod or node.
 - External IPs are shared across all nodes — any node can receive and process return traffic.
 - BPF programs and maps are pinned to bpffs — existing connections survive daemon restarts.
 - Port ranges are per (pod, external IP) pair — no NAT table collisions by construction.
+- **CNI-agnostic by default** — works with any veth-based CNI; Cilium is an optional integration.
 
 ---
 
@@ -47,6 +48,54 @@ packets are processed in two stages:
 This two-stage design is possible because port ranges are allocated uniquely per (pod, external IP)
 pair, so the NAT port alone identifies the pod without needing to carry the external IP through
 the return path.
+
+---
+
+## BPF Attachment Modes
+
+### Default mode (CNI-agnostic)
+
+The daemon attaches BPF programs directly via netlink using standard Linux TC hooks. No CNI
+plugin API is required.
+
+| Hook | Interface | Direction | Role |
+|---|---|---|---|
+| TC egress | host-side veth | egress | Outbound SNAT |
+| TC ingress | node uplink | ingress | Stage 1: IP revNAT |
+| TC ingress | host-side veth | ingress | Stage 2: port revNAT |
+
+The daemon locates the host-side veth for each client pod by inspecting the pod's network
+namespace (via `/proc/<pid>/ns/net`) and resolving the peer index via netlink. TC programs are
+attached and detached as pods start and stop.
+
+**Conntrack bypass:** kernel conntrack is incompatible with the two-stage revNAT because it
+would see the stage 1 IP rewrite without having tracked the original connection from the pod IP.
+The daemon installs `iptables -t raw` `NOTRACK` rules for the external IP pool on startup:
+
+```
+iptables -t raw -A PREROUTING  -d <external-IP-pool> -j NOTRACK
+iptables -t raw -A OUTPUT      -s <external-IP-pool> -j NOTRACK
+```
+
+This ensures conntrack is bypassed for all NAT traffic; mooring's own BPF maps are the
+authoritative connection state.
+
+### Cilium integration (optional feature)
+
+When enabled, the daemon uses the CiliumDatapathPlugin API instead of direct TC attachment.
+
+| Hook | Cilium equivalent | Role |
+|---|---|---|
+| TC egress on host-side veth | `cil_from_container` | Outbound SNAT |
+| TC ingress on node uplink | `cil_from_netdev` extension | Stage 1: IP revNAT |
+| TC ingress on host-side veth | `cil_to_container` | Stage 2: port revNAT |
+
+Conntrack bypass is not needed in this mode because Cilium's BPF host routing already disables
+kernel conntrack cluster-wide.
+
+**Caveats:** Cilium mode introduces ordering dependencies with other TC programs on the uplink
+interface. Coexistence must be validated per Cilium version. This mode is tested as a secondary
+target; the default mode is the reference implementation.
 
 ---
 
@@ -201,13 +250,16 @@ Type: `BPF_MAP_TYPE_HASH`. Updated by the daemon when `MasqPortRange` resources 
 
 ## Packet Flow
 
+The hook names below use the default (CNI-agnostic) TC attachment. See
+[BPF Attachment Modes](#bpf-attachment-modes) for the Cilium equivalents.
+
 ### Outbound (client pod → external server)
 
 ```
 client pod
   │  src=pod-IP:pod-port, dst=server-IP:server-port
   ▼
-cil_from_container  (CiliumDatapathPlugin, attached to egress-client pods only)
+TC egress — host-side veth  (attached to egress-client pods only)
   │  matches dst against Gateway targetCIDRs
   │  looks up pod-IP in SNAT config map → selects externalIP + allocates NAT-port
   │  writes NAT table: {pod-IP, NAT-port, server-IP, server-port} → {pod-port}
@@ -226,7 +278,7 @@ external server
   ▼
 Any node (BGP ECMP)
   ▼
-cil_from_netdev  (CiliumDatapathPlugin extension, all nodes)
+TC ingress — node uplink  (all nodes)
   │  checks dst-IP against external IP pool
   │  looks up port-range map[externalIP][NAT-port] → pod-IP
   │  rewrites dst: externalIP:NAT-port → pod-IP:NAT-port
@@ -242,7 +294,7 @@ BGP routing  (pod-IP is routable → packet forwarded to pod's node)
 Client node
   │  src=server-IP:server-port, dst=pod-IP:NAT-port
   ▼
-cil_to_container  (CiliumDatapathPlugin, attached to egress-client pods only)
+TC ingress — host-side veth  (attached to egress-client pods only)
   │  looks up NAT table: {pod-IP, NAT-port, server-IP, server-port} → {pod-port}
   │  rewrites dst-port: NAT-port → pod-port
   ▼
@@ -274,8 +326,10 @@ Responsibilities:
 - Watches `MasqPortRange` resources; syncs allocations into the SNAT config map and port-range
   lookup map.
 - Runs a BGP speaker that advertises all external IPs from all Gateways.
-- Installs and pins BPF programs for outbound SNAT (`cil_from_container`), stage 1 IP revNAT
-  (`cil_from_netdev`), and stage 2 port revNAT (`cil_to_container`) via CiliumDatapathPlugin.
+- **Default mode**: attaches and detaches TC BPF programs on host-side veth interfaces and the
+  node uplink via netlink; installs `iptables -t raw NOTRACK` rules for the external IP pool.
+- **Cilium mode**: installs BPF programs via CiliumDatapathPlugin instead of direct TC attachment;
+  skips NOTRACK rules.
 - Performs periodic NAT table cleanup for stale entries.
 
 ---
@@ -284,13 +338,14 @@ Responsibilities:
 
 ### New pod startup
 
-1. Pod is scheduled on a node and its network namespace is configured by Cilium CNI.
+1. Pod is scheduled on a node and its network namespace is configured by the CNI plugin.
 2. Daemon on that node detects the new pod (via pod informer) and creates a
    `MasqPortRangeRequest`.
 3. Operator allocates port ranges and creates a `MasqPortRange`.
 4. Daemon on every node syncs the new `MasqPortRange` into the port-range lookup map.
-5. Daemon on the pod's node syncs the SNAT config map and attaches the outbound BPF program to
-   the pod endpoint via CiliumDatapathPlugin (`InstrumentCollection`).
+5. Daemon on the pod's node syncs the SNAT config map and attaches the outbound and inbound BPF
+   programs to the pod's host-side veth (default mode) or pod endpoint via CiliumDatapathPlugin
+   (Cilium mode).
 6. Pod is marked ready.
 
 ### Pod deletion
@@ -322,10 +377,11 @@ cleanup via the grace period mechanism.
 - **Max concurrent connections per pod per external IP** is bounded by the assigned port range
   size. Pods with high connection churn should be assigned to a dedicated IP pool with a larger
   default range size.
-- **Requires Cilium with BPF host routing**. Kernel conntrack is not used; non-Cilium CNI
-  compatibility is deferred.
 - **Requires BGP underlay** with pod CIDRs advertised (native routing). Overlay networks are not
   supported.
+- **Cilium mode requires** Cilium with BPF host routing and the CiliumDatapathPlugin API. It is
+  tested as a secondary target and may have ordering dependencies with other TC programs on the
+  uplink interface.
 
 ---
 
@@ -337,3 +393,6 @@ cleanup via the grace period mechanism.
   then spill to the next) vs. round-robin per connection. Deferred to implementation.
 - **BPF map type for port-range lookup**: per-external-IP array (simple, O(1), ~256 KB per IP) is
   the baseline; alternatives can be evaluated during implementation.
+- **TC program coexistence on the uplink**: if other tools (e.g. bandwidth shaping, observability)
+  also attach TC programs to the node uplink, ordering and priority need to be defined. The
+  default mode must document expected TC chain position.
