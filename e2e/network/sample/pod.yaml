@@ -71,8 +71,8 @@ spec:
       labels:
         app: internet-client
         identity.neco.cybozu.io: internet-client
-      annotations:
-        egress.coil.cybozu.com/internet-egress: nat
+      # annotations:
+      #   egress.coil.cybozu.com/internet-egress: nat
     spec:
       securityContext:
         runAsUser: 10000
@@ -99,8 +99,8 @@ spec:
       labels:
         app: domestic-client
         identity.neco.cybozu.io: incluster-client
-      annotations:
-        egress.coil.cybozu.com/domestic-egress: nat
+      # annotations:
+      #   egress.coil.cybozu.com/domestic-egress: nat
     spec:
       securityContext:
         runAsUser: 10000
@@ -127,8 +127,8 @@ spec:
       labels:
         app: domestic1-client
         identity.neco.cybozu.io: incluster-client
-      annotations:
-        egress.coil.cybozu.com/domestic1-egress: nat
+      # annotations:
+      #   egress.coil.cybozu.com/domestic1-egress: nat
     spec:
       securityContext:
         runAsUser: 10000
@@ -155,9 +155,9 @@ spec:
       labels:
         app: multi-client
         identity.neco.cybozu.io: incluster-client
-      annotations:
-        egress.coil.cybozu.com/domestic-egress: nat
-        egress.coil.cybozu.com/domestic1-egress: nat
+      # annotations:
+      #   egress.coil.cybozu.com/domestic-egress: nat
+      #   egress.coil.cybozu.com/domestic1-egress: nat
     spec:
       securityContext:
         runAsUser: 10000

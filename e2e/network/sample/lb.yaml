@@ -15,6 +15,7 @@ spec:
     spec:
       containers:
       - image: ghcr.io/cybozu/testhttpd:0
+        imagePullPolicy: IfNotPresent
         name: testhttpd
         lifecycle:
           preStop:
@@ -59,6 +60,7 @@ spec:
     spec:
       containers:
       - image: ghcr.io/cybozu/testhttpd:0
+        imagePullPolicy: IfNotPresent
         name: testhttpd
         lifecycle:
           preStop:

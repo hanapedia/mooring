@@ -32,4 +32,5 @@ spec:
       containers:
       - name: testhttpd
         image: ghcr.io/cybozu/testhttpd:0
+        imagePullPolicy: IfNotPresent
 ---

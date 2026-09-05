@@ -1,10 +1,10 @@
-name: neco-apps-lite
+name: kind-with-bgp
 topology:
   nodes:
     # kind nodes
     # ref: ./cluster.kind.yaml
     # rack 0
-    neco-apps-lite:
+    kind-with-bgp:
       kind: k8s-kind
       image: kindest/node:v__K8S_VERSION__
       startup-config: cluster.kind.yaml
@@ -12,19 +12,19 @@ topology:
         k8s_kind:
           deploy:
             wait: 0s
-    neco-apps-lite-control-plane:
+    kind-with-bgp-control-plane:
       kind: ext-container
-    neco-apps-lite-worker:
+    kind-with-bgp-worker:
       kind: ext-container
-    neco-apps-lite-worker2:
+    kind-with-bgp-worker2:
       kind: ext-container
-    neco-apps-lite-worker3:
+    kind-with-bgp-worker3:
       kind: ext-container
     control-plane:
-      network-mode: container:neco-apps-lite-control-plane
+      network-mode: container:kind-with-bgp-control-plane
       kind: linux
       # Ensure to build the bird image in advance.
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/control-plane.conf:/etc/bird/bird.conf
       exec:
@@ -32,10 +32,10 @@ topology:
       - ip route replace default via __CONTROL_PLANE_GW__ dev node0
     # rack 0
     worker:
-      network-mode: container:neco-apps-lite-worker
+      network-mode: container:kind-with-bgp-worker
       kind: linux
       # Ensure to build the bird image in advance.
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/worker.conf:/etc/bird/bird.conf
       exec:
@@ -43,10 +43,10 @@ topology:
       - ip route replace default via __WORKER_GW__ dev node0
     # rack 1
     worker2:
-      network-mode: container:neco-apps-lite-worker2
+      network-mode: container:kind-with-bgp-worker2
       kind: linux
       # Ensure to build the bird image in advance.
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/worker2.conf:/etc/bird/bird.conf
       exec:
@@ -54,10 +54,10 @@ topology:
       - ip route replace default via __WORKER2_GW__ dev node0
     # rack 2
     worker3:
-      network-mode: container:neco-apps-lite-worker3
+      network-mode: container:kind-with-bgp-worker3
       kind: linux
       # Ensure to build the bird image in advance.
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/worker3.conf:/etc/bird/bird.conf
       exec:
@@ -67,7 +67,7 @@ topology:
     tor0:
       kind: linux
       # Ensure to build the bird image in advance.
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/tor0.conf:/etc/bird/bird.conf
       exec:
@@ -82,7 +82,7 @@ topology:
     # ToR for rack 1
     tor1:
       kind: linux
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/tor1.conf:/etc/bird/bird.conf
       exec:
@@ -96,7 +96,7 @@ topology:
     # ToR for rack 2
     tor2:
       kind: linux
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/tor2.conf:/etc/bird/bird.conf
       exec:
@@ -111,7 +111,7 @@ topology:
     # router0 acts as an internet gateway via eth0 which is created by docker network.
     router0:
       kind: linux
-      image: bird:BIRD_VERSION-neco-apps-lite
+      image: bird:BIRD_VERSION-kind-with-bgp
       binds:
         - bird/router0.conf:/etc/bird/bird.conf
       exec:

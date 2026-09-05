@@ -1,6 +1,6 @@
 cluster.clab.yaml
 .cluster.clab.yaml.bak
-clab-neco-apps-lite
+clab-kind-with-bgp
 coil/coil-config.yaml
 coil/upstream.yaml
 cilium/upstream.yaml

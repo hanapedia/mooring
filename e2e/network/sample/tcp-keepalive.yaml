@@ -19,7 +19,7 @@ spec:
         runAsGroup: 10000
       containers:
       - image: ghcr.io/cybozu/tcp-keepalive:0
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         name: tcp-keepalive-server
         command:
         - tcp-keepalive
@@ -64,7 +64,7 @@ spec:
         runAsGroup: 10000
       containers:
       - image: ghcr.io/cybozu/tcp-keepalive:0
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         name: tcp-keepalive-client
         command:
         - tcp-keepalive

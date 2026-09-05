@@ -6,14 +6,10 @@ resources:
   - tcp-keepalive.yaml
   - pod.yaml
   - lb.yaml
-  - network-policy.yaml
 images:
   - name: ghcr.io/cybozu/testhttpd
     newTag: "0"
-    digest: sha256:0eab0837c64860c5487fe6f369a8373a0b80fb2466ba2fb3899428b54d1dad4c
   - name: ghcr.io/cybozu/ubuntu-debug
     newTag: "24.04"
-    digest: sha256:c45eb269e1a4037957923ada86e8db758835809e02b9ba210de565d767fbd1f4
   - name: ghcr.io/cybozu/tcp-keepalive
     newTag: "0"
-    digest: sha256:4ed8e1f6e8e40caccef014e19c54a6ed31c627430fc355e757dbc3b4c0022c02
