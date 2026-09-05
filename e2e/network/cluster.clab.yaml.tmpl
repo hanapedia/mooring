@@ -1,0 +1,182 @@
+name: neco-apps-lite
+topology:
+  nodes:
+    # kind nodes
+    # ref: ./cluster.kind.yaml
+    # rack 0
+    neco-apps-lite:
+      kind: k8s-kind
+      image: kindest/node:v__K8S_VERSION__
+      startup-config: cluster.kind.yaml
+      extras:
+        k8s_kind:
+          deploy:
+            wait: 0s
+    neco-apps-lite-control-plane:
+      kind: ext-container
+    neco-apps-lite-worker:
+      kind: ext-container
+    neco-apps-lite-worker2:
+      kind: ext-container
+    neco-apps-lite-worker3:
+      kind: ext-container
+    control-plane:
+      network-mode: container:neco-apps-lite-control-plane
+      kind: linux
+      # Ensure to build the bird image in advance.
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/control-plane.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __CONTROL_PLANE_IP__ dev node0
+      - ip route replace default via __CONTROL_PLANE_GW__ dev node0
+    # rack 0
+    worker:
+      network-mode: container:neco-apps-lite-worker
+      kind: linux
+      # Ensure to build the bird image in advance.
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/worker.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __WORKER_IP__ dev node0
+      - ip route replace default via __WORKER_GW__ dev node0
+    # rack 1
+    worker2:
+      network-mode: container:neco-apps-lite-worker2
+      kind: linux
+      # Ensure to build the bird image in advance.
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/worker2.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __WORKER2_IP__ dev node0
+      - ip route replace default via __WORKER2_GW__ dev node0
+    # rack 2
+    worker3:
+      network-mode: container:neco-apps-lite-worker3
+      kind: linux
+      # Ensure to build the bird image in advance.
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/worker3.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __WORKER3_IP__ dev node0
+      - ip route replace default via __WORKER3_GW__ dev node0
+    # ToR for rack 0
+    tor0:
+      kind: linux
+      # Ensure to build the bird image in advance.
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/tor0.conf:/etc/bird/bird.conf
+      exec:
+      - ip link add br0 type bridge
+      - ip addr add 10.69.0.1/24 dev br0
+      - ip link set br0 up
+      - ip link set net1 master br0
+      - ip link set net2 master br0
+      - ip addr add 10.72.0.2/30 dev net0
+      - ip route replace default via 10.72.0.1 dev net0
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    # ToR for rack 1
+    tor1:
+      kind: linux
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/tor1.conf:/etc/bird/bird.conf
+      exec:
+      - ip link add br0 type bridge
+      - ip addr add 10.69.1.1/24 dev br0
+      - ip link set br0 up
+      - ip link set net1 master br0
+      - ip addr add 10.72.1.2/30 dev net0
+      - ip route replace default via 10.72.1.1 dev net0
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    # ToR for rack 2
+    tor2:
+      kind: linux
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/tor2.conf:/etc/bird/bird.conf
+      exec:
+      - ip link add br0 type bridge
+      - ip addr add 10.69.2.1/24 dev br0
+      - ip link set br0 up
+      - ip link set net1 master br0
+      - ip addr add 10.72.2.2/30 dev net0
+      - ip route replace default via 10.72.2.1 dev net0
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    # Upstream router connected to all ToRs.
+    # router0 acts as an internet gateway via eth0 which is created by docker network.
+    router0:
+      kind: linux
+      image: bird:BIRD_VERSION-neco-apps-lite
+      binds:
+        - bird/router0.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.72.0.1/30 dev net0
+      - ip addr add 10.72.1.1/30 dev net1
+      - ip addr add 10.72.2.1/30 dev net2
+      - ip addr add 192.168.0.101/24 dev domestic0
+      - ip addr add 192.168.10.101/24 dev domestic1
+      - ip addr add 192.168.1.201/24 dev registry0
+      - ip addr add 172.191.0.2/24 dev host0
+      - sysctl -w net.ipv4.ip_forward=1
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+      # for internet-egress and internet lb
+      - iptables -t nat -A POSTROUTING -s 172.190.0.0/28 -o eth0 -j MASQUERADE
+      # for k8s nodes
+      - iptables -t nat -A POSTROUTING -s 10.69.0.0/16 -o eth0 -j MASQUERADE
+      # for domestic-egress and registry
+      - iptables -t nat -A POSTROUTING -s 192.168.0.0/26 -o domestic0 -j MASQUERADE
+      # for domestic1-egress
+      - iptables -t nat -A POSTROUTING -s 192.168.10.0/26 -o domestic1 -j MASQUERADE
+      # Firewall settings from pods that is not reachable to domestic network.
+      - iptables -A FORWARD -s 172.190.0.0/24 -d 192.168.0.64/26 -j DROP
+      - iptables -A FORWARD -s 10.64.0.0/16 -d 192.168.0.64/26 -j DROP
+      - iptables -A FORWARD -s 172.190.0.0/24 -d 192.168.10.64/26 -j DROP
+      - iptables -A FORWARD -s 10.64.0.0/16 -d 192.168.10.64/26 -j DROP
+    domestic0:
+      kind: linux
+      image: ghcr.io/cybozu/ubuntu-debug:24.04
+      exec:
+      - ip addr add 192.168.0.100/24 dev net0
+      - ip route replace default via 192.168.0.101 dev net0
+    domestic1:
+      kind: linux
+      image: ghcr.io/cybozu/ubuntu-debug:24.04
+      exec:
+      - ip addr add 192.168.10.100/24 dev net0
+      - ip route replace default via 192.168.10.101 dev net0
+    registry:
+      kind: linux
+      image: registry:2
+      binds:
+        # Make sure to create the directory before running the container
+        # Now containerlab does not support named volume attachment, so we have to specify absolute path to the created volume.
+        - /var/lib/docker/volumes/ghcr-registry-data/_data:/var/lib/registry
+      ports:
+        - 5000:5000
+      exec:
+      - ip addr add 192.168.1.202/24 dev net0
+      - ip route replace default via 192.168.1.201 dev net0
+    # I'm not sure why this commands are executed.
+    # So, I do same things in a NetworkTasks.yaml
+    # host:
+    #   kind: host
+    #   exec:
+    #   - ip addr add 172.191.0.1/24 dev to-npl
+    #   - ip route add 172.191.0.16/28 via 172.191.0.2 dev to-npl
+  links:
+    - endpoints: ["tor0:net1", "control-plane:node0"]
+    - endpoints: ["tor0:net2", "worker:node0"]
+    - endpoints: ["tor1:net1", "worker2:node0"]
+    - endpoints: ["tor2:net1", "worker3:node0"]
+    - endpoints: ["router0:net0", "tor0:net0"]
+    - endpoints: ["router0:net1", "tor1:net0"]
+    - endpoints: ["router0:net2", "tor2:net0"]
+    - endpoints: ["router0:domestic0", "domestic0:net0"]
+    - endpoints: ["router0:domestic1", "domestic1:net0"]
+    - endpoints: ["router0:registry0", "registry:net0"]
+    - endpoints: ["host:to-npl", "router0:host0"]

@@ -1,0 +1,22 @@
+---
+checksum:
+  enabled: true
+  require_checksum: true
+  supported_envs:
+  - linux
+registries:
+  - type: standard
+    ref: v4.520.2
+packages:
+  - name: go-task/task@v3.51.1
+  - name: helm/helm@v3.20.2
+  - name: kubernetes-sigs/kind@v0.32.0
+  - name: kubernetes-sigs/krew@v0.5.0
+  - name: kubernetes-sigs/kustomize@kustomize/v5.7.1
+  - name: kubernetes/kubectl@v1.35.3
+  - name: mikefarah/yq@v4.53.2
+  - name: srl-labs/containerlab@v0.76.0
+  - name: cilium/cilium-cli@v0.19.4
+  - name: cilium/hubble@v1.19.3
+  - name: jqlang/jq@jq-1.8.1
+  - name: suzuki-shunsuke/pinact@v4.0.0

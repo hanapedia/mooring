@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: testhttpd
+  labels:
+    app: testhttpd
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: testhttpd
+  template:
+    metadata:
+      labels:
+        app: testhttpd
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - testhttpd
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsUser: 10000
+        runAsGroup: 10000
+      containers:
+      - name: testhttpd
+        image: ghcr.io/cybozu/testhttpd:0
+---

@@ -1,0 +1,27 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-only-internet-ingress
+spec:
+  endpointSelector:
+    matchLabels:
+      identity.neco.cybozu.io: internet
+  ingress:
+    - fromEntities:
+        - world
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-only-domestic-and-incluster
+spec:
+  endpointSelector:
+    matchLabels:
+      identity.neco.cybozu.io: domestic
+  ingress:
+    - fromCIDR:
+        - 192.168.0.0/24
+        - 192.168.10.0/24
+    - fromEndpoints:
+        - matchLabels:
+            identity.neco.cybozu.io: incluster-client
