@@ -14,6 +14,6 @@ RUN CGO_ENABLED=0 go build \
       -o /moorctl \
       ./cmd/moorctl
 
-FROM scratch
-COPY --from=builder /moorctl /moorctl
-ENTRYPOINT ["/moorctl"]
+FROM alpine:3.22
+COPY --from=builder /moorctl /usr/local/bin/moorctl
+ENTRYPOINT ["moorctl"]

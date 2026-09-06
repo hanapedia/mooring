@@ -156,18 +156,9 @@ int snat_egress(struct __sk_buff *skb) {
     bpf_map_update_elem(&nat_table, &nk, &nv, BPF_ANY);
   }
 
-  // fix ip checksum
-  __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
-  bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
-
-  // fix l4 checksum with updated src ip
-  bpf_l4_csum_replace(skb, csum_off, pod_ip, ext_ip,
-                      BPF_F_PSEUDO_HDR | sizeof(__be32));
-
-  // fix l4 checksum with updated src port
-  bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
-
-  // rewrite headers
+  // rewrite headers before csum helpers: bpf_l3/l4_csum_replace call
+  // skb_make_writable internally, which can reallocate the skb and causes the
+  // verifier to invalidate all PTR_TO_PACKET registers. Do direct writes first.
   iph->saddr = ext_ip;
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
@@ -180,6 +171,14 @@ int snat_egress(struct __sk_buff *skb) {
       return TC_ACT_OK;
     udph->source = nat_port;
   }
+
+  // fix checksums — from/to values are passed explicitly so the order relative
+  // to the header rewrites above does not affect correctness.
+  __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
+  bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
+  bpf_l4_csum_replace(skb, csum_off, pod_ip, ext_ip,
+                      BPF_F_PSEUDO_HDR | sizeof(__be32));
+  bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
 
   return TC_ACT_OK;
 }

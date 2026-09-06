@@ -41,9 +41,21 @@ struct {
   __type(value, __u8);
 } target_cidrs SEC(".maps");
 
-static __always_inline int do_port_revnat(struct __sk_buff *skb, void *data_end,
-                                          struct iphdr *iph, __be16 nat_port,
+// Re-derives packet pointers from skb so callers that have already called csum
+// helpers (which invalidate PTR_TO_PACKET registers) can safely call this.
+static __always_inline int do_port_revnat(struct __sk_buff *skb, __be16 nat_port,
                                           __be16 server_port, __u32 csum_off) {
+  void *data = (void *)(long)skb->data;
+  void *data_end = (void *)(long)skb->data_end;
+
+  struct ethhdr *eth = data;
+  if ((void *)(eth + 1) > data_end)
+    return TC_ACT_OK;
+
+  struct iphdr *iph = (void *)(eth + 1);
+  if ((void *)(iph + 1) > data_end)
+    return TC_ACT_OK;
+
   // look up nat_table to see if the pod is local
   struct nat_key nk = {
       .pod_ip = iph->daddr,
@@ -57,10 +69,9 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb, void *data_end,
     return TC_ACT_OK;
 
   __be16 pod_port = nv->pod_port;
-  // fix l4 checksum with updated src port
-  bpf_l4_csum_replace(skb, csum_off, nat_port, pod_port, sizeof(__be16));
 
-  // rewrite headers
+  // rewrite headers before csum helper (bpf_l4_csum_replace calls
+  // skb_make_writable, which can invalidate PTR_TO_PACKET registers)
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
@@ -72,6 +83,8 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb, void *data_end,
       return TC_ACT_OK;
     udph->dest = pod_port;
   }
+
+  bpf_l4_csum_replace(skb, csum_off, nat_port, pod_port, sizeof(__be16));
 
   return TC_ACT_OK;
 }
@@ -150,7 +163,7 @@ int revnat_ingress(struct __sk_buff *skb) {
   // dst is not an external IP — stage 1 already ran on another node and dst is
   // now pod_ip. attempt stage 2 directly.
   if (!bpf_map_lookup_elem(&ext_ip_pool, &dlpm))
-    return do_port_revnat(skb, data_end, iph, nat_port, server_port, csum_off);
+    return do_port_revnat(skb, nat_port, server_port, csum_off);
 
   // lookup the port range to find pod ip
   struct port_key pk = {.ext_ip = iph->daddr, .nat_port = nat_port};
@@ -159,17 +172,17 @@ int revnat_ingress(struct __sk_buff *skb) {
     return TC_ACT_OK;
   __be32 pod_ip = *pod_ip_ptr;
 
-  // fix ip checksum
   __be32 ext_ip = iph->daddr;
+
+  // rewrite dst IP before csum helpers (which invalidate PTR_TO_PACKET regs)
+  iph->daddr = pod_ip;
+
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
   bpf_l3_csum_replace(skb, ip_csum, ext_ip, pod_ip, sizeof(__be32));
-
-  // fix l4 checksum with updated dst ip
   bpf_l4_csum_replace(skb, csum_off, ext_ip, pod_ip,
                       BPF_F_PSEUDO_HDR | sizeof(__be32));
 
-  // rewrite dst IP only — nat_port left intact for do_port_revnat
-  iph->daddr = pod_ip;
-
-  return do_port_revnat(skb, data_end, iph, nat_port, server_port, csum_off);
+  // do_port_revnat re-derives its own packet pointers from skb, so it is safe
+  // to call after the csum helpers above have invalidated our iph pointer.
+  return do_port_revnat(skb, nat_port, server_port, csum_off);
 }

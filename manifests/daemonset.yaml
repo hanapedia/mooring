@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mooring-system
+---
+# Setup script mounted into every node agent pod.
+# Edit MOORING_UPLINK_IFACE, MOORING_TARGET_CIDRS, and MOORING_EXT_IP_POOL
+# in the DaemonSet env section to match your environment.
+# Add extra `moorctl map snat-config add` / `moorctl map port-range add`
+# calls here for each client pod that should be SNATed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mooring-setup
+  namespace: mooring-system
+data:
+  setup.sh: |
+    #!/bin/sh
+    set -eu
+
+    mkdir -p /sys/fs/bpf/mooring
+
+    echo "Loading BPF programs on interface ${MOORING_UPLINK_IFACE}..."
+    moorctl load -i "${MOORING_UPLINK_IFACE}"
+
+    echo "Configuring target CIDRs..."
+    for cidr in ${MOORING_TARGET_CIDRS}; do
+      moorctl map target-cidr add --cidr "${cidr}"
+    done
+
+    echo "Configuring external IP pool..."
+    for cidr in ${MOORING_EXT_IP_POOL}; do
+      moorctl map ext-ip add --cidr "${cidr}"
+    done
+
+    # Example: add a client pod's SNAT config and port range.
+    # Repeat for each pod that should egress through mooring.
+    #
+    #   moorctl map snat-config add \
+    #     --pod-ip   10.0.0.5 \
+    #     --ext-ip   203.0.113.1 \
+    #     --port-start 1000 \
+    #     --port-end   1099
+    #
+    #   moorctl map port-range add \
+    #     --ext-ip     203.0.113.1 \
+    #     --pod-ip     10.0.0.5 \
+    #     --port-start 1000 \
+    #     --port-end   1099
+
+    echo "mooring setup complete."
+    exec sleep infinity
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mooring
+  namespace: mooring-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mooring
+  namespace: mooring-system
+spec:
+  selector:
+    matchLabels:
+      app: mooring
+  template:
+    metadata:
+      labels:
+        app: mooring
+    spec:
+      serviceAccountName: mooring
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      initContainers:
+        - name: mount-bpffs
+          image: ghcr.io/hanapedia/mooring:v0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              grep -q " /sys/fs/bpf bpf " /proc/mounts || mount -t bpf bpf /sys/fs/bpf
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+              mountPropagation: Bidirectional
+
+      containers:
+        - name: mooring
+          image: ghcr.io/hanapedia/mooring:v0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/scripts/setup.sh"]
+
+          env:
+            # Name of the node uplink interface (same on every node, or use
+            # a DaemonSet field ref / node-level config if it varies).
+            - name: MOORING_UPLINK_IFACE
+              value: "node0"
+            # Space-separated destination CIDRs that trigger SNAT.
+            - name: MOORING_TARGET_CIDRS
+              value: "192.168.10.100/24"
+            # Space-separated external IP CIDRs owned by this cluster.
+            - name: MOORING_EXT_IP_POOL
+              value: "192.168.10.0/26"
+
+          securityContext:
+            privileged: true
+
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+              mountPropagation: Bidirectional
+            - name: btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+            - name: setup-script
+              mountPath: /scripts
+
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: btf
+          hostPath:
+            path: /sys/kernel/btf
+            type: Directory
+        - name: setup-script
+          configMap:
+            name: mooring-setup
+            defaultMode: 0755
