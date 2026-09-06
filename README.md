@@ -27,15 +27,15 @@ mooring eliminates this by moving SNAT to the client pod's own node and decoupli
 
 ### Outbound
 
-The client pod's node performs SNAT using a pre-allocated port range. A TC egress BPF program on the pod's host-side veth rewrites the source to `externalIP:NAT-port` and records the mapping in a per-node NAT table.
+The client pod's node performs SNAT using a pre-allocated port range. A TC egress BPF program on the node uplink rewrites the source to `externalIP:NAT-port` and records the mapping in a per-node NAT table.
 
 ### Return path (two stages)
 
-Return traffic is distributed across all nodes via BGP ECMP. Processing happens in two hops:
+Return traffic is distributed across all nodes via BGP ECMP. A single TC ingress BPF program on the node uplink handles both revNAT stages:
 
-1. **Stage 1 — IP revNAT (any node):** A TC ingress BPF program on the node uplink checks the destination against the external IP pool, resolves the pod IP from the NAT port using a shared port-range lookup map, and rewrites the destination IP. BGP then routes the packet to the pod's node.
+1. **Stage 1 — IP revNAT:** If the destination is a known external IP, the program resolves the pod IP from the NAT port using the shared port-range lookup map and rewrites the destination IP.
 
-2. **Stage 2 — port revNAT (client node):** A TC ingress BPF program on the host-side veth looks up the full NAT table entry and restores the original pod port before delivering to the pod.
+2. **Stage 2 — port revNAT:** The program then looks up the full NAT table entry and restores the original pod port. If the pod is on the same node (**same-node optimization**), both stages complete in a single BPF pass. If the pod is on a different node, BGP routes the packet there and the uplink ingress program on that node handles stage 2.
 
 This two-stage split works because port ranges are unique per `(pod, external IP)` pair — the NAT port alone identifies both the pod and which external IP was used, without carrying extra state through the network.
 
@@ -49,35 +49,40 @@ Kernel conntrack is bypassed for NAT traffic. The daemon installs `iptables -t r
                ┌──────────────┐
                │  client pod  │
                └──────┬───────┘
-                      │ TC egress — host-side veth (SNAT: pod-IP:pod-port → extIP:NAT-port)
+                      │
+               node uplink
+                      │ TC egress (SNAT: pod-IP:pod-port → extIP:NAT-port)
                       ▼
                 BGP routing → external server
 
-     ┌─────────────────────────────────────────────────────┐
-     │ Return path                                          │
-     │                                                      │
-     │  external server                                     │
-     │    → any node (ECMP)                                 │
-     │    → TC ingress — uplink  [Stage 1: IP revNAT]       │
-     │        extIP:NAT-port → pod-IP:NAT-port              │
-     │    → BGP routing to pod's node                       │
-     │    → TC ingress — host-side veth  [Stage 2: port revNAT] │
-     │        pod-IP:NAT-port → pod-IP:pod-port             │
-     │    → client pod ✓                                    │
-     └─────────────────────────────────────────────────────┘
+     ┌──────────────────────────────────────────────────────────────┐
+     │ Return path                                                   │
+     │                                                               │
+     │  external server                                              │
+     │    → any node (ECMP)                                          │
+     │    → TC ingress — node uplink  [Stage 1: IP revNAT]           │
+     │        extIP:NAT-port → pod-IP:NAT-port                       │
+     │        same-node? → [Stage 2: port revNAT]                    │
+     │            pod-IP:NAT-port → pod-IP:pod-port → pod ✓          │
+     │        cross-node? → BGP routing to pod's node                │
+     │            → TC ingress — node uplink  [Stage 2: port revNAT] │
+     │                pod-IP:NAT-port → pod-IP:pod-port → pod ✓      │
+     └──────────────────────────────────────────────────────────────┘
 ```
 
 ## BPF Attachment Modes
 
-### Default (CNI-agnostic)
+### Default (CNI-agnostic, node uplink)
 
-The daemon attaches TC BPF programs directly via netlink. No CNI plugin API is required.
+Both BPF programs attach to the node uplink once at daemon startup via netlink. No per-pod veth
+management is required.
 
 | Hook | Interface | Direction | Role |
 |---|---|---|---|
-| TC egress | host-side veth | egress | Outbound SNAT |
-| TC ingress | node uplink | ingress | Stage 1: IP revNAT |
-| TC ingress | host-side veth | ingress | Stage 2: port revNAT |
+| TC egress | node uplink | egress | Outbound SNAT |
+| TC ingress | node uplink | ingress | Combined stage 1 + 2 revNAT |
+
+Per-veth attachment (narrower scope, per-pod TC management) is planned as a future configuration option.
 
 ### Cilium integration (optional)
 
@@ -170,7 +175,7 @@ spec:
 - Watches pods matching Gateway selectors; creates `MasqPortRangeRequest` for new pods.
 - Syncs `MasqPortRange` resources into SNAT config and port-range lookup BPF maps.
 - Runs a BGP speaker that advertises all external IPs from all Gateways.
-- Attaches TC BPF programs via netlink (default) or CiliumDatapathPlugin (Cilium mode).
+- Attaches TC BPF programs to the node uplink at startup via netlink (default mode; no per-pod TC attachment); uses CiliumDatapathPlugin in Cilium mode.
 - Installs `iptables -t raw NOTRACK` rules for the external IP pool (default mode only).
 - Performs periodic NAT table cleanup for stale entries.
 
