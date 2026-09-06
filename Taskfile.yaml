@@ -50,6 +50,13 @@ tasks:
     cmds:
       - go build -o bin/moorctl ./cmd/moorctl
 
+  docker-build:
+    desc: Build the moorctl container image
+    vars:
+      IMAGE: '{{.IMAGE | default "ghcr.io/hanapedia/mooring:latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
   all:
     desc: Full build (setup → generate → build)
     cmds:
