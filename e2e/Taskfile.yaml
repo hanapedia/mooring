@@ -6,6 +6,9 @@ vars:
   BIRD_VERSION: '{{.BIRD_VERSION | default "3.2.2.1"}}'
   CONTAINERLAB_VERSION: '{{.CONTAINERLAB_VERSION | default "0.78.2"}}'
 
+  MOORING_IMAGE: '{{.MOORING_IMAGE | default "ghcr.io/hanapedia/mooring"}}'
+  MOORING_TAG: '{{.MOORING_TAG | default "v0.1.0"}}'
+
   COIL_VERSION: '{{.COIL_VERSION | default "2.15.0"}}'
   COIL_TAG: '{{.COIL_TAG | default "2.15.0" }}'
   COIL_REPO: '{{.COIL_REPO | default "https://github.com/cybozu-go/coil.git"}}'
@@ -39,6 +42,7 @@ tasks:
       - task: install-coil
       # - task: install-cilium
       - task: wait-coil
+      - task: install-mooring
       - task: apply-sample-resources
 
   stop:
@@ -185,6 +189,104 @@ tasks:
         --set certgen.image.repository=ghcr.io/cybozu/cilium-certgen
         --set certgen.image.tag={{.CILIUM_CERTGEN_VERSION}}
         --set certgen.image.useDigest=false > network/cilium/upstream.yaml
+
+  install-mooring:
+    desc: Build, load, and install the mooring DaemonSet
+    cmds:
+      - task: build-mooring-image
+      - kind load docker-image {{.MOORING_IMAGE}}:{{.MOORING_TAG}} --name kind-with-bgp
+      - |
+        yq '
+          (select(.kind == "DaemonSet")
+          .spec.template.spec.containers[]
+          | select(.name == "mooring")
+          .image) = "{{.MOORING_IMAGE}}:{{.MOORING_TAG}}"
+        ' ../manifests/daemonset.yaml | kubectl apply -f -
+      - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring
+
+  build-mooring-image:
+    desc: Build the mooring container image
+    dir: ..
+    cmds:
+      - docker build -t {{.MOORING_IMAGE}}:{{.MOORING_TAG}} .
+
+  mooring-exec:
+    desc: Run moorctl CMD on every mooring pod. Usage; task mooring-exec CMD="unload"
+    vars:
+      CMD: '{{.CMD | default ""}}'
+    cmds:
+      - |
+        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
+          echo "=== $pod ==="
+          kubectl exec -n mooring-system "$pod" -c mooring -- moorctl {{.CMD}}
+        done
+
+  mooring-unload:
+    desc: Run moorctl unload on every mooring pod
+    cmds:
+      - task: mooring-exec
+        vars: { CMD: "unload" }
+
+  # ── domestic1 e2e ─────────────────────────────────────────────────────────────
+
+  e2e-domestic1:
+    desc: Full domestic1 e2e scenario (setup then test)
+    cmds:
+      - task: e2e-domestic1-setup
+      - task: e2e-domestic1-test
+
+  e2e-domestic1-setup:
+    desc: Wire up SNAT for domestic1-client (ext prefix 192.168.10.0/26 is baked into worker2 bird config)
+    vars:
+      EXT_IP: '192.168.10.0'
+      PORT_START: '1000'
+      PORT_END: '1099'
+    cmds:
+      # Step 1: domestic1-client nodeSelector already pins it to kind-with-bgp-worker.
+      #         Just wait for it to be scheduled and ready.
+      - kubectl wait deployment/domestic1-client -n default --for condition=Available --timeout 60s
+      # Step 2: add per-pod SNAT config and port range to all mooring instances.
+      #         POD_IP is resolved here, after the wait above, so the pod is ready.
+      - task: mooring-add-client
+        vars:
+          POD_IP:
+            sh: kubectl get pod -n default -l app=domestic1-client -o jsonpath='{.items[0].status.podIP}'
+          EXT_IP: "{{.EXT_IP}}"
+          PORT_START: "{{.PORT_START}}"
+          PORT_END: "{{.PORT_END}}"
+
+  e2e-domestic1-test:
+    desc: Curl domestic1 server (192.168.10.100:8000) from domestic1-client pod
+    cmds:
+      - |
+        POD=$(kubectl get pod -n default -l app=domestic1-client -o name | head -1)
+        kubectl exec -n default "${POD}" -- curl -s --max-time 10 192.168.10.100:8000
+
+
+  mooring-add-client:
+    desc: Add SNAT config and port range for a client pod on every mooring instance
+    vars:
+      POD_IP: '{{.POD_IP | default ""}}'
+      EXT_IP: '{{.EXT_IP | default ""}}'
+      PORT_START: '{{.PORT_START | default "1000"}}'
+      PORT_END: '{{.PORT_END | default "1099"}}'
+    cmds:
+      - task: mooring-exec
+        vars:
+          CMD: >-
+            map snat-config add
+            --pod-ip {{.POD_IP}}
+            --ext-ip {{.EXT_IP}}
+            --port-start {{.PORT_START}}
+            --port-end {{.PORT_END}}
+      - task: mooring-exec
+        vars:
+          CMD: >-
+            map port-range add
+            --ext-ip {{.EXT_IP}}
+            --pod-ip {{.POD_IP}}
+            --port-start {{.PORT_START}}
+            --port-end {{.PORT_END}}
 
   apply-sample-resources:
     desc: Apply sample resources

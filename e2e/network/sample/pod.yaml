@@ -130,6 +130,8 @@ spec:
       # annotations:
       #   egress.coil.cybozu.com/domestic1-egress: nat
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: kind-with-bgp-worker
       securityContext:
         runAsUser: 10000
         runAsGroup: 10000

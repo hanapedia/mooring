@@ -25,11 +25,11 @@ spec:
   subnets:
     - ipv4: 192.168.0.0/26
 ---
-apiVersion: coil.cybozu.com/v2
-kind: AddressPool
-metadata:
-  name: domestic1-egress
-spec:
-  blockSizeBits: 0
-  subnets:
-    - ipv4: 192.168.10.0/26
+# apiVersion: coil.cybozu.com/v2
+# kind: AddressPool
+# metadata:
+#   name: domestic1-egress
+# spec:
+#   blockSizeBits: 0
+#   subnets:
+#     - ipv4: 192.168.10.0/26
