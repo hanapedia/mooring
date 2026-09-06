@@ -1,0 +1,47 @@
+[
+  {
+    "directory": "/workspace",
+    "arguments": [
+      "clang",
+      "--target=bpf",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-I/workspace/bpf/headers",
+      "-I/usr/local/include",
+      "-c",
+      "bpf/snat_egress.c"
+    ],
+    "file": "bpf/snat_egress.c"
+  },
+  {
+    "directory": "/workspace",
+    "arguments": [
+      "clang",
+      "--target=bpf",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-I/workspace/bpf/headers",
+      "-I/usr/local/include",
+      "-c",
+      "bpf/revnat_ip.c"
+    ],
+    "file": "bpf/revnat_ip.c"
+  },
+  {
+    "directory": "/workspace",
+    "arguments": [
+      "clang",
+      "--target=bpf",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-I/workspace/bpf/headers",
+      "-I/usr/local/include",
+      "-c",
+      "bpf/revnat_port.c"
+    ],
+    "file": "bpf/revnat_port.c"
+  }
+]
