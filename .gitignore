@@ -1,3 +1,7 @@
 bpf/headers/vmlinux.h
 .dev-headers/
 .cache/
+internal/bpf/*_bpfel.o
+internal/bpf/*_bpfeb.o
+bin/
+vendor/

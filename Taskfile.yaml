@@ -36,3 +36,23 @@ tasks:
     cmds:
       - task: gen-vmlinux
       - task: gen-dev-headers
+
+  generate:
+    desc: Generate Go BPF bindings from C sources (requires clang and task setup)
+    dir: internal/bpf
+    cmds:
+      - go generate .
+
+  build:
+    desc: Build moorctl binary to bin/moorctl
+    env:
+      CGO_ENABLED: "0"
+    cmds:
+      - go build -o bin/moorctl ./cmd/moorctl
+
+  all:
+    desc: Full build (setup → generate → build)
+    cmds:
+      - task: setup
+      - task: generate
+      - task: build

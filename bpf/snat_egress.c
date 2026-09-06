@@ -138,8 +138,9 @@ int snat_egress(struct __sk_buff *skb) {
   } else {
     // new connection — allocate a port and record it
     __u16 range = port_end - port_start + 1;
-    nat_port = bpf_htons(port_start +
-                         (__sync_fetch_and_add(&entry->next_port, 1) % range));
+    __u32 slot = entry->next_port;
+    __sync_fetch_and_add(&entry->next_port, 1);
+    nat_port = bpf_htons(port_start + (slot % range));
 
     struct session_val new_sv = {.nat_port = nat_port};
     bpf_map_update_elem(&outbound_sessions, &sk, &new_sv, BPF_ANY);
