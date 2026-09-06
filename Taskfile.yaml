@@ -1,0 +1,38 @@
+# https://taskfile.dev
+version: '3'
+
+includes:
+  e2e:
+    taskfile: ./e2e/Taskfile.yaml
+    dir: ./e2e
+
+tasks:
+  gen-vmlinux:
+    desc: Generate bpf/headers/vmlinux.h from the running kernel (requires bpftool)
+    cmds:
+      - bpftool btf dump file /sys/kernel/btf/vmlinux format c > bpf/headers/vmlinux.h
+
+  gen-dev-headers:
+    desc: Copy libbpf BPF headers into .dev-headers/bpf/
+    vars:
+      LIBBPF_BPF_DIR:
+        sh: |
+          for dir in /usr/include/bpf /usr/local/include/bpf; do
+            [ -f "$dir/bpf_helpers.h" ] && echo "$dir" && exit 0
+          done
+          find /nix/store -maxdepth 4 -name "bpf_helpers.h" 2>/dev/null \
+            | grep libbpf | sort | tail -1 | sed 's|/bpf_helpers.h||'
+    cmds:
+      - mkdir -p .dev-headers/bpf
+      - cp
+        {{.LIBBPF_BPF_DIR}}/bpf_helpers.h
+        {{.LIBBPF_BPF_DIR}}/bpf_endian.h
+        {{.LIBBPF_BPF_DIR}}/bpf_helper_defs.h
+        {{.LIBBPF_BPF_DIR}}/bpf_core_read.h
+        .dev-headers/bpf/
+
+  setup:
+    desc: Generate all local development artifacts (vmlinux.h and .dev-headers/)
+    cmds:
+      - task: gen-vmlinux
+      - task: gen-dev-headers

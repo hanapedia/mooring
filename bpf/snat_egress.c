@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include "maps.h"
 #include "tc.h"
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
@@ -14,19 +15,6 @@ struct snat_entry {
   __u32 next_port; /* atomic counter for port allocation */
 };
 
-struct nat_key {
-  __be32 pod_ip;
-  __be16 nat_port;
-  __be32 server_ip;
-  __be16 server_port;
-  __u8 proto;
-  __u8 pad[3]; /* verifier does not allow uninitialized bytes */
-};
-
-struct nat_val {
-  __be16 pod_port;
-};
-
 /* forward session map key: original connection 5-tuple */
 struct session_key {
   __be32 pod_ip;
@@ -39,11 +27,6 @@ struct session_key {
 
 struct session_val {
   __be16 nat_port;
-};
-
-struct lpm_key {
-  __u32 prefixlen;
-  __be32 addr;
 };
 
 /// Map defs
@@ -112,6 +95,10 @@ int snat_egress(struct __sk_buff *skb) {
   struct snat_entry *entry = bpf_map_lookup_elem(&snat_config, &pod_ip);
   if (!entry)
     return TC_ACT_OK;
+  // save fields immediately — entry pointer may be invalidated by later map ops
+  __be32 ext_ip = entry->ext_ip;
+  __u16 port_start = entry->port_start;
+  __u16 port_end = entry->port_end;
 
   // parse l4 header
   __be16 pod_port, server_port;
@@ -150,8 +137,8 @@ int snat_egress(struct __sk_buff *skb) {
     nat_port = sv->nat_port;
   } else {
     // new connection — allocate a port and record it
-    __u16 range = entry->port_end - entry->port_start + 1;
-    nat_port = bpf_htons(entry->port_start +
+    __u16 range = port_end - port_start + 1;
+    nat_port = bpf_htons(port_start +
                          (__sync_fetch_and_add(&entry->next_port, 1) % range));
 
     struct session_val new_sv = {.nat_port = nat_port};
@@ -169,7 +156,6 @@ int snat_egress(struct __sk_buff *skb) {
   }
 
   // fix ip checksum
-  __be32 ext_ip = entry->ext_ip;
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
   bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
 
