@@ -73,17 +73,15 @@ map. The ingress program handles both revNAT stages in a single pass:
 - If the destination is already a pod IP (cross-node: stage 1 ran on another node), stage 2 is
   performed directly.
 
-**Conntrack bypass:** kernel conntrack is incompatible with the two-stage revNAT because it
-would see the stage 1 IP rewrite without having tracked the original connection from the pod IP.
-The daemon installs `iptables -t raw` `NOTRACK` rules for the external IP pool on startup:
+**Conntrack bypass:** on a transit node (stage 1 ran here, pod is on another node), conntrack
+would see the rewritten SYN-ACK as a new, untracked connection and mark it INVALID — causing
+`KUBE-FORWARD`'s `ctstate INVALID -j DROP` rule to drop the packet before it can be forwarded.
 
-```
-iptables -t raw -A PREROUTING  -d <external-IP-pool> -j NOTRACK
-iptables -t raw -A OUTPUT      -s <external-IP-pool> -j NOTRACK
-```
-
-This ensures conntrack is bypassed for all NAT traffic; mooring's own BPF maps are the
-authoritative connection state.
+Instead of iptables NOTRACK rules, the stage 1 not-local path returns
+`bpf_redirect_neigh(skb->ifindex, NULL, 0, 0)` rather than `TC_ACT_OK`. This sends the packet
+directly through the kernel's FIB + neighbor subsystem, bypassing netfilter entirely. The correct
+L2 dst MAC is resolved automatically; no iptables rules are installed. mooring's own BPF maps are
+the authoritative connection state.
 
 ### Per-veth attachment (future configuration option)
 
@@ -342,9 +340,9 @@ Responsibilities:
   lookup map.
 - Runs a BGP speaker that advertises all external IPs from all Gateways.
 - **Default mode**: attaches TC BPF programs to the node uplink once at startup via netlink; no
-  per-pod veth management; installs `iptables -t raw NOTRACK` rules for the external IP pool.
-- **Cilium mode**: installs BPF programs via CiliumDatapathPlugin instead of direct TC attachment;
-  skips NOTRACK rules.
+  per-pod veth management; conntrack is bypassed via `bpf_redirect_neigh` on the transit path
+  (no iptables rules required).
+- **Cilium mode**: installs BPF programs via CiliumDatapathPlugin instead of direct TC attachment.
 - Performs periodic NAT table cleanup for stale entries.
 
 ---

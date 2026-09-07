@@ -41,7 +41,7 @@ This two-stage split works because port ranges are unique per `(pod, external IP
 
 ### Conntrack
 
-Kernel conntrack is bypassed for NAT traffic. The daemon installs `iptables -t raw NOTRACK` rules for the external IP pool on startup. mooring's own BPF maps are the authoritative connection state. In Cilium mode this step is skipped because Cilium's BPF host routing already disables conntrack cluster-wide.
+On a transit node (stage 1 ran here but the pod lives elsewhere), conntrack would see the stage 1 IP rewrite as an untracked connection and mark the packet INVALID, causing `KUBE-FORWARD` to drop it. mooring avoids this without any iptables rules: the stage 1 not-local path uses `bpf_redirect_neigh` instead of `TC_ACT_OK`, sending the packet directly through the kernel FIB and neighbor subsystem and bypassing netfilter entirely. mooring's own BPF maps are the authoritative connection state.
 
 ## Architecture
 
@@ -176,7 +176,6 @@ spec:
 - Syncs `MasqPortRange` resources into SNAT config and port-range lookup BPF maps.
 - Runs a BGP speaker that advertises all external IPs from all Gateways.
 - Attaches TC BPF programs to the node uplink at startup via netlink (default mode; no per-pod TC attachment); uses CiliumDatapathPlugin in Cilium mode.
-- Installs `iptables -t raw NOTRACK` rules for the external IP pool (default mode only).
 - Performs periodic NAT table cleanup for stale entries.
 
 ## Update Resiliency
