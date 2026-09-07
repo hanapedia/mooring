@@ -288,6 +288,90 @@ tasks:
             --port-start {{.PORT_START}}
             --port-end {{.PORT_END}}
 
+  # ── diagnostics ───────────────────────────────────────────────────────────────
+
+  mooring-logs:
+    desc: Print logs from every mooring pod
+    cmds:
+      - |
+        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
+          echo "=== $pod ==="
+          kubectl logs -n mooring-system "$pod" -c mooring --tail=50
+        done
+
+  mooring-diag:
+    desc: Check bpffs pin state on every mooring pod
+    cmds:
+      - |
+        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
+          echo "=== $pod ==="
+          kubectl exec -n mooring-system "$pod" -c mooring -- ls -la /sys/fs/bpf/mooring/ 2>&1 || echo "bpffs not accessible"
+        done
+
+  e2e-domestic1-diag:
+    desc: Check all three revNAT stage-1 map conditions on every mooring pod
+    cmds:
+      - |
+        SRC=192.168.10.100
+        DST=192.168.10.0
+        PORT=1000
+        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
+          NODE=$(kubectl get -n mooring-system "$pod" -o jsonpath='{.spec.nodeName}')
+          echo "=== $pod (node=$NODE) ==="
+          kubectl exec -n mooring-system "$pod" -c mooring -- \
+            moorctl diag stage1 --src-ip $SRC --dst-ip $DST --dst-port $PORT
+        done
+
+  worker2-trace:
+    desc: Stream BPF trace_pipe from kind-with-bgp-worker2 for 15 s (run in parallel with e2e-domestic1-test)
+    cmds:
+      - |
+        sudo docker exec kind-with-bgp-worker2 sh -c '
+          echo 1 > /sys/kernel/debug/tracing/tracing_on
+          timeout 15 cat /sys/kernel/debug/tracing/trace_pipe || true
+        '
+
+  worker-trace:
+    desc: Stream BPF trace_pipe from kind-with-bgp-worker for 15 s (run in parallel with e2e-domestic1-test)
+    cmds:
+      - |
+        sudo docker exec kind-with-bgp-worker sh -c '
+          echo 1 > /sys/kernel/debug/tracing/tracing_on
+          timeout 15 cat /sys/kernel/debug/tracing/trace_pipe || true
+        '
+
+  worker2-route:
+    desc: Show kernel route for the domestic1-client pod IP on worker2
+    cmds:
+      - |
+        POD_IP=$(kubectl get pod -n default -l app=domestic1-client -o jsonpath='{.items[0].status.podIP}')
+        echo "routing for pod_ip=$POD_IP on worker2:"
+        POD=$(kubectl get pod -n mooring-system -o name --field-selector spec.nodeName=kind-with-bgp-worker2 | head -1)
+        kubectl exec -n mooring-system "$POD" -c mooring -- ip route get "$POD_IP"
+      - |
+        echo "--- node IP addresses ---"
+        kubectl get nodes -o wide
+
+  node-ifindex:
+    desc: Print node0 ifindex on every mooring pod so bpf_printk ifindex= values can be correlated to nodes
+    cmds:
+      - |
+        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
+          NODE=$(kubectl get -n mooring-system "$pod" -o jsonpath='{.spec.nodeName}')
+          IDX=$(kubectl exec -n mooring-system "$pod" -c mooring -- cat /sys/class/net/node0/ifindex 2>/dev/null || echo "N/A")
+          echo "node=$NODE  node0 ifindex=$IDX"
+        done
+
+  router0-route:
+    desc: Check if router0 has a route to the domestic1-client pod IP (verifies post-stage1 packet can reach worker)
+    cmds:
+      - |
+        POD_IP=$(kubectl get pod -n default -l app=domestic1-client -o jsonpath='{.items[0].status.podIP}')
+        echo "router0 route for pod_ip=$POD_IP:"
+        sudo docker exec clab-kind-with-bgp-router0 ip route get "$POD_IP" 2>&1 || \
+          sudo docker exec router0 ip route get "$POD_IP" 2>&1 || \
+          echo "could not reach router0 container"
+
   apply-sample-resources:
     desc: Apply sample resources
     cmds:
