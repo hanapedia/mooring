@@ -1,0 +1,19 @@
+$ task e2e:e2e-domestic1-test
+task: [e2e:e2e-domestic1-test] POD=$(kubectl get pod -n default -l app=domestic1-client -o name | head -1)
+kubectl exec -n default "${POD}" -- curl -s --max-time 10 192.168.10.100:8000
+
+Hello⏎
+---
+$ sudo nsenter -t $(docker inspect -f '{{.State.Pid}}' clab-kind-with-bgp-worker) -n tcpdump -i node0 -n 'host 192.168.10.100 or host 10.64.0.3'
+tcpdump: verbose output suppressed, use -v[v]... for full protocol decode
+listening on node0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+21:02:23.048847 IP 192.168.10.0.1004 > 192.168.10.100.8000: Flags [S], seq 1866375872, win 56760, options [mss 9460,sackOK,TS val 2085911521 ecr 0,nop,wscale 10], length 0
+21:02:23.048911 IP 192.168.10.100.8000 > 10.64.0.3.1004: Flags [S.], seq 628414150, ack 1866375873, win 56688, options [mss 9460,sackOK,TS val 2491930626 ecr 2085911521,nop,wscale 10], length 0
+21:02:23.048923 IP 192.168.10.0.1004 > 192.168.10.100.8000: Flags [.], ack 628414151, win 56, options [nop,nop,TS val 2085911521 ecr 2491930626], length 0
+21:02:23.048952 IP 192.168.10.0.1004 > 192.168.10.100.8000: Flags [P.], seq 0:82, ack 1, win 56, options [nop,nop,TS val 2085911521 ecr 2491930626], length 82
+21:02:23.048964 IP 192.168.10.100.8000 > 10.64.0.3.1004: Flags [.], ack 83, win 56, options [nop,nop,TS val 2491930626 ecr 2085911521], length 0
+21:02:23.049111 IP 192.168.10.100.8000 > 10.64.0.3.1004: Flags [P.], seq 1:122, ack 83, win 56, options [nop,nop,TS val 2491930626 ecr 2085911521], length 121
+21:02:23.049122 IP 192.168.10.0.1004 > 192.168.10.100.8000: Flags [.], ack 122, win 56, options [nop,nop,TS val 2085911521 ecr 2491930626], length 0
+21:02:23.049156 IP 192.168.10.0.1004 > 192.168.10.100.8000: Flags [F.], seq 82, ack 122, win 56, options [nop,nop,TS val 2085911521 ecr 2491930626], length 0
+21:02:23.049194 IP 192.168.10.100.8000 > 10.64.0.3.1004: Flags [F.], seq 122, ack 84, win 56, options [nop,nop,TS val 2491930626 ecr 2085911521], length 0
+21:02:23.049210 IP 192.168.10.0.1004 > 192.168.10.100.8000: Flags [.], ack 123, win 56, options [nop,nop,TS val 2085911521 ecr 2491930626], length 0
