@@ -12,7 +12,7 @@ char __license[] SEC("license") = "GPL";
 struct {
   __uint(type, BPF_MAP_TYPE_LPM_TRIE);
   __uint(map_flags, BPF_F_NO_PREALLOC);
-  __uint(max_entries, 256);
+  __uint(max_entries, MAX_EXT_IPS);
   __type(key, struct lpm_key);
   __type(value, __u8);
 } ext_ip_pool SEC(".maps");
@@ -32,22 +32,6 @@ struct {
   __type(key, __be32); // ext_ip network byte order
   __array(values, struct port_range_inner_t);
 } port_range_lookup SEC(".maps");
-
-// MUST match definition with snat_egress.c
-struct {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 65536);
-  __type(key, struct nat_key);
-  __type(value, struct nat_val);
-} nat_table SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-  __uint(map_flags, BPF_F_NO_PREALLOC);
-  __uint(max_entries, 256);
-  __type(key, struct lpm_key);
-  __type(value, __u8);
-} target_cidrs SEC(".maps");
 
 // Re-derives packet pointers from skb so callers that have already called csum
 // helpers (which invalidate PTR_TO_PACKET registers) can safely call this.

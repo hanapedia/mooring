@@ -48,24 +48,9 @@ struct {
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 65536);
-  __type(key, struct nat_key);
-  __type(value, struct nat_val);
-} nat_table SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 65536);
   __type(key, struct session_key);
   __type(value, struct session_val);
 } outbound_sessions SEC(".maps");
-
-struct {
-  __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-  __uint(map_flags, BPF_F_NO_PREALLOC);
-  __uint(max_entries, 256);
-  __type(key, struct lpm_key);
-  __type(value, __u8);
-} target_cidrs SEC(".maps");
 
 /// entrypoint for snat_egress
 SEC("tc")
