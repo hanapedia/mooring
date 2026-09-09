@@ -7,6 +7,8 @@
 
 char __license[] SEC("license") = "GPL";
 
+#define MAX_EXT_IPS 256
+
 struct {
   __uint(type, BPF_MAP_TYPE_LPM_TRIE);
   __uint(map_flags, BPF_F_NO_PREALLOC);
@@ -15,17 +17,23 @@ struct {
   __type(value, __u8);
 } ext_ip_pool SEC(".maps");
 
-/* Fill the ports in the range for allocated port each IP
- * Only for PoC.
- * For actual implementation crete range for each ext IP
- */
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
+// inner map indicating port allocation for an ext ip
+struct port_range_inner_t {
+  __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, 65536);
-  __type(key, struct port_key);
-  __type(value, __be32); // pod_ip
+  __type(key, __u32);    // port index
+  __type(value, __be32); // pod ip network byte order
+} port_range_inner SEC(".maps");
+
+// maps
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
+  __uint(max_entries, MAX_EXT_IPS);
+  __type(key, __be32); // ext_ip network byte order
+  __array(values, struct port_range_inner_t);
 } port_range_lookup SEC(".maps");
 
+// MUST match definition with snat_egress.c
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 65536);
@@ -43,8 +51,9 @@ struct {
 
 // Re-derives packet pointers from skb so callers that have already called csum
 // helpers (which invalidate PTR_TO_PACKET registers) can safely call this.
-static __always_inline int do_port_revnat(struct __sk_buff *skb, __be16 nat_port,
-                                          __be16 server_port, __u32 csum_off) {
+static __always_inline int do_port_revnat(struct __sk_buff *skb,
+                                          __be16 nat_port, __be16 server_port,
+                                          __u32 csum_off) {
   void *data = (void *)(long)skb->data;
   void *data_end = (void *)(long)skb->data_end;
 
@@ -66,7 +75,9 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb, __be16 nat_port
   };
   struct nat_val *nv = bpf_map_lookup_elem(&nat_table, &nk);
   if (!nv) {
-    bpf_printk("revnat: stage2 not-local ifindex=%u src=%x dst=%x port=%u\n", skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
+    bpf_printk("revnat: stage2 not-local ifindex=%u src=%x dst=%x port=%u\n",
+               skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+               bpf_ntohs(nat_port));
     // Bypass netfilter entirely: route via the neighbor subsystem so conntrack
     // never sees this transit packet (avoids KUBE-FORWARD INVALID drop).
     return bpf_redirect_neigh(skb->ifindex, NULL, 0, 0);
@@ -88,7 +99,9 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb, __be16 nat_port
     udph->dest = pod_port;
   }
 
-  bpf_printk("revnat: stage2 local ifindex=%u src=%x dst=%x port=%u\n", skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
+  bpf_printk("revnat: stage2 local ifindex=%u src=%x dst=%x port=%u\n",
+             skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+             bpf_ntohs(nat_port));
 
   bpf_l4_csum_replace(skb, csum_off, nat_port, pod_port, sizeof(__be16));
 
@@ -169,24 +182,30 @@ int revnat_ingress(struct __sk_buff *skb) {
   // dst is not an external IP — stage 1 already ran on another node and dst is
   // now pod_ip. attempt stage 2 directly.
   if (!bpf_map_lookup_elem(&ext_ip_pool, &dlpm)) {
-    bpf_printk("revnat: stage2 path ifindex=%u src=%x dst=%x\n", skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr));
+    bpf_printk("revnat: stage2 path ifindex=%u src=%x dst=%x\n", skb->ifindex,
+               bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr));
     return do_port_revnat(skb, nat_port, server_port, csum_off);
   }
 
-  bpf_printk("revnat: stage1 path ifindex=%u src=%x dst=%x port=%u\n", skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
+  bpf_printk("revnat: stage1 path ifindex=%u src=%x dst=%x port=%u\n",
+             skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+             bpf_ntohs(nat_port));
 
   // lookup the port range to find pod ip
-  struct port_key pk = {.ext_ip = iph->daddr, .nat_port = nat_port};
-  __be32 *pod_ip_ptr = bpf_map_lookup_elem(&port_range_lookup, &pk);
-  if (!pod_ip_ptr) {
-    bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n", bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
+  __be32 ext_ip = iph->daddr;
+  void *inner = bpf_map_lookup_elem(&port_range_lookup, &ext_ip);
+  if (!inner) {
+    bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
+               bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
     return TC_ACT_OK;
   }
-  __be32 pod_ip = *pod_ip_ptr;
-
-  __be32 ext_ip = iph->daddr;
+  __u32 port_idx = bpf_ntohs(nat_port);
+  __be32 *pod_ip_ptr = bpf_map_lookup_elem(inner, &port_idx);
+  if (!pod_ip_ptr || !*pod_ip_ptr) // check if the value is zero
+    return TC_ACT_OK;
 
   // rewrite dst IP before csum helpers (which invalidate PTR_TO_PACKET regs)
+  __be32 pod_ip = *pod_ip_ptr;
   iph->daddr = pod_ip;
 
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);

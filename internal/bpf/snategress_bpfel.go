@@ -50,15 +50,21 @@ type SnatEgressSessionKey struct {
 
 type SnatEgressSessionVal struct {
 	_       structs.HostLayout
+	ExtIp   uint32
 	NatPort uint16
+	_       [2]byte
 }
 
-type SnatEgressSnatEntry struct {
-	_         structs.HostLayout
-	ExtIp     uint32
-	PortStart uint16
-	PortEnd   uint16
-	NextPort  uint32
+type SnatEgressSnatConfigVal struct {
+	_           structs.HostLayout
+	Allocations [16]struct {
+		_         structs.HostLayout
+		ExtIp     uint32
+		PortStart uint16
+		PortEnd   uint16
+		NextPort  uint32
+	}
+	Count uint32
 }
 
 // Names of all BPF objects in the ELF.

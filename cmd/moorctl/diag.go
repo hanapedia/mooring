@@ -76,26 +76,38 @@ func runDiagStage1(_ *cobra.Command, _ []string) error {
 	epErr := ep.Lookup(epKey, &epVal)
 	diagCheck("ext_ip_pool[dst=%s]", epErr, diagDstIP)
 
-	// ── 3. port_range_lookup ──────────────────────────────────────────────────
+	// ── 3. port_range_lookup (HASH_OF_MAPS) ──────────────────────────────────
 	pl, err := ebpf.LoadPinnedMap(diagMapsDir+"/port_range_lookup", nil)
 	if err != nil {
 		return fmt.Errorf("open port_range_lookup: %w", err)
 	}
 	defer pl.Close()
 
-	plKey := mooringbpf.RevnatIngressPortKey{
-		ExtIp:   dstU32,
-		NatPort: diagHtons(diagDstPort),
-	}
-	var podIPRaw uint32
-	plErr := pl.Lookup(plKey, &podIPRaw)
-	if plErr == nil {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, podIPRaw)
-		fmt.Printf("  port_range_lookup[dst=%s,port=%d] → FOUND → pod_ip=%s\n",
-			diagDstIP, diagDstPort, net.IP(b).String())
-	} else {
-		diagCheck("port_range_lookup[dst=%s,port=%d]", plErr, diagDstIP, diagDstPort)
+	// outer lookup: ext_ip → inner map fd
+	var innerFD uint32
+	innerErr := pl.Lookup(dstU32, &innerFD)
+	diagCheck("port_range_lookup outer[dst=%s]", innerErr, diagDstIP)
+	if innerErr == nil {
+		inner, err := ebpf.NewMapFromFD(int(innerFD))
+		if err != nil {
+			return fmt.Errorf("open inner map: %w", err)
+		}
+		defer inner.Close()
+
+		// inner lookup: port index (host byte order) → pod_ip
+		var podIPRaw uint32
+		portIdx := uint32(diagDstPort)
+		plErr := inner.Lookup(portIdx, &podIPRaw)
+		if plErr == nil && podIPRaw != 0 {
+			b := make([]byte, 4)
+			binary.LittleEndian.PutUint32(b, podIPRaw)
+			fmt.Printf("  port_range_lookup inner[port=%d] → FOUND → pod_ip=%s\n",
+				diagDstPort, net.IP(b).String())
+		} else if plErr == nil {
+			fmt.Printf("  port_range_lookup inner[port=%d] → FOUND but pod_ip=0 ← ✗\n", diagDstPort)
+		} else {
+			diagCheck("port_range_lookup inner[port=%d]", plErr, diagDstPort)
+		}
 	}
 
 	return nil
@@ -108,8 +120,6 @@ func runDiagStage1(_ *cobra.Command, _ []string) error {
 func diagIPToU32(ip net.IP) uint32 {
 	return binary.LittleEndian.Uint32(ip.To4())
 }
-
-func diagHtons(p uint16) uint16 { return p>>8 | p<<8 }
 
 func diagCheck(fmtStr string, err error, args ...any) {
 	label := fmt.Sprintf(fmtStr, args...)

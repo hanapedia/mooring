@@ -17,9 +17,3 @@ struct lpm_key {
   __u32 prefixlen;
   __be32 addr;
 };
-
-struct port_key {
-  __be32 ext_ip;
-  __be16 nat_port;
-  __u8 pad[2];
-};

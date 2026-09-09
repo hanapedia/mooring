@@ -36,19 +36,13 @@ type RevnatIngressNatVal struct {
 	PodPort uint16
 }
 
-type RevnatIngressPortKey struct {
-	_       structs.HostLayout
-	ExtIp   uint32
-	NatPort uint16
-	Pad     [2]uint8
-}
-
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	RevnatIngressMapExtIpPool       = "ext_ip_pool"
 	RevnatIngressMapNatTable        = "nat_table"
+	RevnatIngressMapPortRangeInner  = "port_range_inner"
 	RevnatIngressMapPortRangeLookup = "port_range_lookup"
 	RevnatIngressMapTargetCidrs     = "target_cidrs"
 	RevnatIngressProgRevnatIngress  = "revnat_ingress"
@@ -105,6 +99,7 @@ type RevnatIngressProgramSpecs struct {
 type RevnatIngressMapSpecs struct {
 	ExtIpPool       *ebpf.MapSpec `ebpf:"ext_ip_pool"`
 	NatTable        *ebpf.MapSpec `ebpf:"nat_table"`
+	PortRangeInner  *ebpf.MapSpec `ebpf:"port_range_inner"`
 	PortRangeLookup *ebpf.MapSpec `ebpf:"port_range_lookup"`
 	TargetCidrs     *ebpf.MapSpec `ebpf:"target_cidrs"`
 }
@@ -137,6 +132,7 @@ func (o *RevnatIngressObjects) Close() error {
 type RevnatIngressMaps struct {
 	ExtIpPool       *ebpf.Map `ebpf:"ext_ip_pool"`
 	NatTable        *ebpf.Map `ebpf:"nat_table"`
+	PortRangeInner  *ebpf.Map `ebpf:"port_range_inner"`
 	PortRangeLookup *ebpf.Map `ebpf:"port_range_lookup"`
 	TargetCidrs     *ebpf.Map `ebpf:"target_cidrs"`
 }
@@ -145,6 +141,7 @@ func (m *RevnatIngressMaps) Close() error {
 	return _RevnatIngressClose(
 		m.ExtIpPool,
 		m.NatTable,
+		m.PortRangeInner,
 		m.PortRangeLookup,
 		m.TargetCidrs,
 	)

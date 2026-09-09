@@ -40,7 +40,7 @@ func runSnatConfigAdd(_ *cobra.Command, _ []string) error {
 	if scPortStart > scPortEnd {
 		return fmt.Errorf("--port-start must be <= --port-end")
 	}
-	return maps.AddSnatConfig(podIP, extIP, scPortStart, scPortEnd)
+	return maps.UpsertSnatEntry(podIP, extIP, scPortStart, scPortEnd)
 }
 
 // ── target-cidr ───────────────────────────────────────────────────────────────

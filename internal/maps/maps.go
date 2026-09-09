@@ -2,6 +2,7 @@ package maps
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -18,11 +19,6 @@ func ipToUint32(ip net.IP) uint32 {
 	return binary.LittleEndian.Uint32(ip.To4())
 }
 
-// htons swaps the bytes of a port number from host to network byte order.
-func htons(p uint16) uint16 {
-	return p>>8 | p<<8
-}
-
 func openMap(name string) (*ebpf.Map, error) {
 	m, err := ebpf.LoadPinnedMap(filepath.Join(mapsDir, name), nil)
 	if err != nil {
@@ -31,8 +27,10 @@ func openMap(name string) (*ebpf.Map, error) {
 	return m, nil
 }
 
-// AddSnatConfig writes a SNAT config entry for podIP → {extIP, portStart, portEnd}.
-func AddSnatConfig(podIP, extIP net.IP, portStart, portEnd uint16) error {
+// UpsertSnatEntry adds or updates the snat_config allocation for (podIP, extIP).
+// If an entry for extIP already exists it is overwritten with the new range and
+// its next_port counter reset to zero; otherwise a new entry is appended.
+func UpsertSnatEntry(podIP, extIP net.IP, portStart, portEnd uint16) error {
 	m, err := openMap("snat_config")
 	if err != nil {
 		return err
@@ -40,12 +38,38 @@ func AddSnatConfig(podIP, extIP net.IP, portStart, portEnd uint16) error {
 	defer m.Close()
 
 	key := ipToUint32(podIP)
-	val := mooringbpf.SnatEgressSnatEntry{
-		ExtIp:     ipToUint32(extIP),
-		PortStart: portStart,
-		PortEnd:   portEnd,
-		NextPort:  0,
+	extIPVal := ipToUint32(extIP)
+
+	var val mooringbpf.SnatEgressSnatConfigVal
+	if err := m.Lookup(key, &val); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("lookup snat_config: %w", err)
 	}
+
+	found := false
+	for i := range val.Allocations {
+		if uint32(i) >= val.Count {
+			break
+		}
+		if val.Allocations[i].ExtIp == extIPVal {
+			val.Allocations[i].PortStart = portStart
+			val.Allocations[i].PortEnd = portEnd
+			val.Allocations[i].NextPort = 0
+			found = true
+			break
+		}
+	}
+	if !found {
+		if val.Count >= uint32(len(val.Allocations)) {
+			return fmt.Errorf("snat_config: max allocations (%d) reached for pod %s", len(val.Allocations), podIP)
+		}
+		idx := val.Count
+		val.Allocations[idx].ExtIp = extIPVal
+		val.Allocations[idx].PortStart = portStart
+		val.Allocations[idx].PortEnd = portEnd
+		val.Allocations[idx].NextPort = 0
+		val.Count++
+	}
+
 	return m.Put(key, val)
 }
 
@@ -93,25 +117,99 @@ func AddExtIP(cidr *net.IPNet) error {
 	return m.Put(key, val)
 }
 
-// AddPortRange expands [portStart, portEnd] into port_range_lookup, writing
-// one {extIP, natPort} → podIP entry per port number.
+// innerMapSpec matches the port_range_inner prototype in revnat_ingress.c:
+// BPF_MAP_TYPE_ARRAY, 65536 entries, key=u32 (port index), value=u32 (pod ip).
+var innerMapSpec = &ebpf.MapSpec{
+	Type:       ebpf.Array,
+	KeySize:    4,
+	ValueSize:  4,
+	MaxEntries: 65536,
+}
+
+// openOrCreateInnerMap returns the inner array map for extIPKey from the outer
+// HASH_OF_MAPS, creating a new one if absent. created=true means the caller
+// must insert the returned map into the outer map before closing it.
+func openOrCreateInnerMap(outer *ebpf.Map, extIPKey uint32) (inner *ebpf.Map, created bool, err error) {
+	var innerFD uint32
+	if err = outer.Lookup(extIPKey, &innerFD); err == nil {
+		inner, err = ebpf.NewMapFromFD(int(innerFD))
+		return inner, false, err
+	}
+	if !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil, false, fmt.Errorf("lookup inner map: %w", err)
+	}
+	inner, err = ebpf.NewMap(innerMapSpec)
+	return inner, true, err
+}
+
+// AddPortRange writes podIP into the per-extIP inner array for every port in
+// [portStart, portEnd]. The inner array is indexed by host-order port number,
+// matching the BPF-side bpf_ntohs(nat_port) lookup.
 func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16) error {
-	m, err := openMap("port_range_lookup")
+	outer, err := openMap("port_range_lookup")
 	if err != nil {
 		return err
 	}
-	defer m.Close()
+	defer outer.Close()
 
-	extIPVal := ipToUint32(extIP)
+	extIPKey := ipToUint32(extIP)
 	podIPVal := ipToUint32(podIP)
 
+	inner, created, err := openOrCreateInnerMap(outer, extIPKey)
+	if err != nil {
+		return fmt.Errorf("open inner map for %v: %w", extIP, err)
+	}
+	defer inner.Close()
+
 	for port := portStart; port <= portEnd; port++ {
-		key := mooringbpf.RevnatIngressPortKey{
-			ExtIp:   extIPVal,
-			NatPort: htons(port),
-		}
-		if err := m.Put(key, podIPVal); err != nil {
+		if err := inner.Put(uint32(port), podIPVal); err != nil {
 			return fmt.Errorf("port %d: %w", port, err)
+		}
+	}
+
+	if created {
+		if err := outer.Put(extIPKey, uint32(inner.FD())); err != nil {
+			return fmt.Errorf("insert inner map for %v: %w", extIP, err)
+		}
+	}
+	return nil
+}
+
+// RemovePortRange zeros out the pod_ip entries for [portStart, portEnd] in the
+// inner array for extIP, but only where the entry still matches podIP.
+func RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16) error {
+	outer, err := openMap("port_range_lookup")
+	if err != nil {
+		return err
+	}
+	defer outer.Close()
+
+	extIPKey := ipToUint32(extIP)
+
+	var innerFD uint32
+	if err := outer.Lookup(extIPKey, &innerFD); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("lookup inner map: %w", err)
+	}
+	inner, err := ebpf.NewMapFromFD(int(innerFD))
+	if err != nil {
+		return fmt.Errorf("open inner map: %w", err)
+	}
+	defer inner.Close()
+
+	podIPVal := ipToUint32(podIP)
+	var zero uint32
+	for port := portStart; port <= portEnd; port++ {
+		var cur uint32
+		if err := inner.Lookup(uint32(port), &cur); err != nil {
+			continue
+		}
+		if cur == podIPVal {
+			if err := inner.Put(uint32(port), zero); err != nil {
+				return fmt.Errorf("zero port %d: %w", port, err)
+			}
 		}
 	}
 	return nil

@@ -15,17 +15,25 @@ struct snat_entry {
   __u32 next_port; /* atomic counter for port allocation */
 };
 
+#define MAX_SNAT_ALLOCS 16
+
+struct snat_config_val {
+  struct snat_entry allocations[MAX_SNAT_ALLOCS];
+  __u32 count;
+};
+
 /* forward session map key: original connection 5-tuple */
 struct session_key {
   __be32 pod_ip;
   __be16 pod_port;
   __be32 server_ip;
   __be16 server_port;
-  __u8   proto;
-  __u8   pad[3];
+  __u8 proto;
+  __u8 pad[3];
 };
 
 struct session_val {
+  __be32 ext_ip;
   __be16 nat_port;
 };
 
@@ -34,7 +42,7 @@ struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 1024);
   __type(key, __be32);
-  __type(value, struct snat_entry);
+  __type(value, struct snat_config_val);
 } snat_config SEC(".maps");
 
 struct {
@@ -92,14 +100,6 @@ int snat_egress(struct __sk_buff *skb) {
 
   // look up snat config for this pod
   __be32 pod_ip = iph->saddr;
-  struct snat_entry *entry = bpf_map_lookup_elem(&snat_config, &pod_ip);
-  if (!entry)
-    return TC_ACT_OK;
-  // save fields immediately — entry pointer may be invalidated by later map ops
-  __be32 ext_ip = entry->ext_ip;
-  __u16 port_start = entry->port_start;
-  __u16 port_end = entry->port_end;
-
   // parse l4 header
   __be16 pod_port, server_port;
   __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
@@ -131,18 +131,37 @@ int snat_egress(struct __sk_buff *skb) {
   };
   struct session_val *sv = bpf_map_lookup_elem(&outbound_sessions, &sk);
 
-  __be16 nat_port;
+  __be32 ext_ip = 0;
+  __be16 nat_port = 0;
   if (sv) {
     // existing connection — reuse the allocated port
+    ext_ip = sv->ext_ip;
     nat_port = sv->nat_port;
   } else {
-    // new connection — allocate a port and record it
-    __u16 range = port_end - port_start + 1;
-    __u32 slot = entry->next_port;
-    __sync_fetch_and_add(&entry->next_port, 1);
-    nat_port = bpf_htons(port_start + (slot % range));
+    struct snat_config_val *cv = bpf_map_lookup_elem(&snat_config, &pod_ip);
+    if (!cv || cv->count == 0) // no snat config found
+      return TC_ACT_OK;
 
-    struct session_val new_sv = {.nat_port = nat_port};
+    for (__u32 i = 0; i < MAX_SNAT_ALLOCS; i++) {
+      if (i >= cv->count)
+        break;
+
+      struct snat_entry *e = &cv->allocations[i];
+      __u16 range = e->port_end - e->port_start + 1;
+      __u32 slot = __sync_fetch_and_add(&e->next_port, 1);
+
+      if (slot >= range)
+        continue; // try next entry
+
+      nat_port = bpf_htons((__u16)(e->port_start + slot));
+      ext_ip = e->ext_ip;
+      break; // stop at first non-exhausted entry
+    }
+
+    if (!ext_ip)
+      return TC_ACT_OK; // all entries exhausted
+
+    struct session_val new_sv = {.ext_ip = ext_ip, .nat_port = nat_port};
     bpf_map_update_elem(&outbound_sessions, &sk, &new_sv, BPF_ANY);
 
     struct nat_key nk = {
