@@ -19,6 +19,7 @@ var (
 	diagSrcIP   string
 	diagDstIP   string
 	diagDstPort uint16
+	diagProto   string
 )
 
 var diagCmd = &cobra.Command{
@@ -48,9 +49,23 @@ func runDiagStage1(_ *cobra.Command, _ []string) error {
 	if dstIP == nil {
 		return fmt.Errorf("invalid --dst-ip %q", diagDstIP)
 	}
+	proto, err := parseProto(diagProto)
+	if err != nil {
+		return err
+	}
 
 	srcU32 := diagIPToU32(srcIP)
 	dstU32 := diagIPToU32(dstIP)
+
+	var portRangeMap string
+	switch proto {
+	case 6:
+		portRangeMap = "port_range_lookup_tcp"
+	case 17:
+		portRangeMap = "port_range_lookup_udp"
+	case 1:
+		portRangeMap = "port_range_lookup_icmp"
+	}
 
 	// ── 1. target_cidrs ───────────────────────────────────────────────────────
 	tc, err := ebpf.LoadPinnedMap(diagMapsDir+"/target_cidrs", nil)
@@ -77,9 +92,9 @@ func runDiagStage1(_ *cobra.Command, _ []string) error {
 	diagCheck("ext_ip_pool[dst=%s]", epErr, diagDstIP)
 
 	// ── 3. port_range_lookup (HASH_OF_MAPS) ──────────────────────────────────
-	pl, err := ebpf.LoadPinnedMap(diagMapsDir+"/port_range_lookup", nil)
+	pl, err := ebpf.LoadPinnedMap(diagMapsDir+"/"+portRangeMap, nil)
 	if err != nil {
-		return fmt.Errorf("open port_range_lookup: %w", err)
+		return fmt.Errorf("open %s: %w", portRangeMap, err)
 	}
 	defer pl.Close()
 
@@ -139,7 +154,9 @@ func init() {
 	diagStage1Cmd.Flags().StringVar(&diagSrcIP, "src-ip", "", "source IP to check in target_cidrs (required)")
 	diagStage1Cmd.Flags().StringVar(&diagDstIP, "dst-ip", "", "destination IP to check in ext_ip_pool and port_range_lookup (required)")
 	diagStage1Cmd.Flags().Uint16Var(&diagDstPort, "dst-port", 0, "destination port to check in port_range_lookup (required)")
+	diagStage1Cmd.Flags().StringVar(&diagProto, "proto", "", "protocol: tcp, udp, or icmp (required)")
 	_ = diagStage1Cmd.MarkFlagRequired("src-ip")
 	_ = diagStage1Cmd.MarkFlagRequired("dst-ip")
 	_ = diagStage1Cmd.MarkFlagRequired("dst-port")
+	_ = diagStage1Cmd.MarkFlagRequired("proto")
 }

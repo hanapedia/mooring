@@ -22,13 +22,9 @@ type SnatEgressLpmKey struct {
 type SnatEgressNatKey struct {
 	_          structs.HostLayout
 	PodIp      uint32
-	NatPort    uint16
-	_          [2]byte
 	ServerIp   uint32
+	NatPort    uint16
 	ServerPort uint16
-	Proto      uint8
-	Pad        [3]uint8
-	_          [2]byte
 }
 
 type SnatEgressNatVal struct {
@@ -71,7 +67,9 @@ type SnatEgressSnatConfigVal struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	SnatEgressMapNatTable         = "nat_table"
+	SnatEgressMapNatTableIcmp     = "nat_table_icmp"
+	SnatEgressMapNatTableTcp      = "nat_table_tcp"
+	SnatEgressMapNatTableUdp      = "nat_table_udp"
 	SnatEgressMapOutboundSessions = "outbound_sessions"
 	SnatEgressMapSnatConfig       = "snat_config"
 	SnatEgressMapTargetCidrs      = "target_cidrs"
@@ -127,7 +125,9 @@ type SnatEgressProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SnatEgressMapSpecs struct {
-	NatTable         *ebpf.MapSpec `ebpf:"nat_table"`
+	NatTableIcmp     *ebpf.MapSpec `ebpf:"nat_table_icmp"`
+	NatTableTcp      *ebpf.MapSpec `ebpf:"nat_table_tcp"`
+	NatTableUdp      *ebpf.MapSpec `ebpf:"nat_table_udp"`
 	OutboundSessions *ebpf.MapSpec `ebpf:"outbound_sessions"`
 	SnatConfig       *ebpf.MapSpec `ebpf:"snat_config"`
 	TargetCidrs      *ebpf.MapSpec `ebpf:"target_cidrs"`
@@ -159,7 +159,9 @@ func (o *SnatEgressObjects) Close() error {
 //
 // It can be passed to LoadSnatEgressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SnatEgressMaps struct {
-	NatTable         *ebpf.Map `ebpf:"nat_table"`
+	NatTableIcmp     *ebpf.Map `ebpf:"nat_table_icmp"`
+	NatTableTcp      *ebpf.Map `ebpf:"nat_table_tcp"`
+	NatTableUdp      *ebpf.Map `ebpf:"nat_table_udp"`
 	OutboundSessions *ebpf.Map `ebpf:"outbound_sessions"`
 	SnatConfig       *ebpf.Map `ebpf:"snat_config"`
 	TargetCidrs      *ebpf.Map `ebpf:"target_cidrs"`
@@ -167,7 +169,9 @@ type SnatEgressMaps struct {
 
 func (m *SnatEgressMaps) Close() error {
 	return _SnatEgressClose(
-		m.NatTable,
+		m.NatTableIcmp,
+		m.NatTableTcp,
+		m.NatTableUdp,
 		m.OutboundSessions,
 		m.SnatConfig,
 		m.TargetCidrs,

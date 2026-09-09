@@ -126,6 +126,20 @@ var innerMapSpec = &ebpf.MapSpec{
 	MaxEntries: 65536,
 }
 
+// portRangeMapName returns the pinned map name for the given IP protocol number.
+func portRangeMapName(proto uint8) (string, error) {
+	switch proto {
+	case 6:
+		return "port_range_lookup_tcp", nil
+	case 17:
+		return "port_range_lookup_udp", nil
+	case 1:
+		return "port_range_lookup_icmp", nil
+	default:
+		return "", fmt.Errorf("unsupported protocol %d (want 1=icmp, 6=tcp, 17=udp)", proto)
+	}
+}
+
 // openOrCreateInnerMap returns the inner array map for extIPKey from the outer
 // HASH_OF_MAPS, creating a new one if absent. created=true means the caller
 // must insert the returned map into the outer map before closing it.
@@ -143,10 +157,15 @@ func openOrCreateInnerMap(outer *ebpf.Map, extIPKey uint32) (inner *ebpf.Map, cr
 }
 
 // AddPortRange writes podIP into the per-extIP inner array for every port in
-// [portStart, portEnd]. The inner array is indexed by host-order port number,
-// matching the BPF-side bpf_ntohs(nat_port) lookup.
-func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16) error {
-	outer, err := openMap("port_range_lookup")
+// [portStart, portEnd] for the given IP protocol (1=ICMP, 6=TCP, 17=UDP).
+// The inner array is indexed by host-order port number, matching the BPF-side
+// bpf_ntohs(nat_port) lookup.
+func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
+	mapName, err := portRangeMapName(proto)
+	if err != nil {
+		return err
+	}
+	outer, err := openMap(mapName)
 	if err != nil {
 		return err
 	}
@@ -177,8 +196,12 @@ func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16) error {
 
 // RemovePortRange zeros out the pod_ip entries for [portStart, portEnd] in the
 // inner array for extIP, but only where the entry still matches podIP.
-func RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16) error {
-	outer, err := openMap("port_range_lookup")
+func RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
+	mapName, err := portRangeMapName(proto)
+	if err != nil {
+		return err
+	}
+	outer, err := openMap(mapName)
 	if err != nil {
 		return err
 	}

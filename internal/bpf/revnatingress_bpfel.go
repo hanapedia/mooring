@@ -22,13 +22,9 @@ type RevnatIngressLpmKey struct {
 type RevnatIngressNatKey struct {
 	_          structs.HostLayout
 	PodIp      uint32
-	NatPort    uint16
-	_          [2]byte
 	ServerIp   uint32
+	NatPort    uint16
 	ServerPort uint16
-	Proto      uint8
-	Pad        [3]uint8
-	_          [2]byte
 }
 
 type RevnatIngressNatVal struct {
@@ -40,12 +36,16 @@ type RevnatIngressNatVal struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	RevnatIngressMapExtIpPool       = "ext_ip_pool"
-	RevnatIngressMapNatTable        = "nat_table"
-	RevnatIngressMapPortRangeInner  = "port_range_inner"
-	RevnatIngressMapPortRangeLookup = "port_range_lookup"
-	RevnatIngressMapTargetCidrs     = "target_cidrs"
-	RevnatIngressProgRevnatIngress  = "revnat_ingress"
+	RevnatIngressMapExtIpPool           = "ext_ip_pool"
+	RevnatIngressMapNatTableIcmp        = "nat_table_icmp"
+	RevnatIngressMapNatTableTcp         = "nat_table_tcp"
+	RevnatIngressMapNatTableUdp         = "nat_table_udp"
+	RevnatIngressMapPortRangeInner      = "port_range_inner"
+	RevnatIngressMapPortRangeLookupIcmp = "port_range_lookup_icmp"
+	RevnatIngressMapPortRangeLookupTcp  = "port_range_lookup_tcp"
+	RevnatIngressMapPortRangeLookupUdp  = "port_range_lookup_udp"
+	RevnatIngressMapTargetCidrs         = "target_cidrs"
+	RevnatIngressProgRevnatIngress      = "revnat_ingress"
 )
 
 // LoadRevnatIngress returns the embedded CollectionSpec for RevnatIngress.
@@ -97,11 +97,15 @@ type RevnatIngressProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type RevnatIngressMapSpecs struct {
-	ExtIpPool       *ebpf.MapSpec `ebpf:"ext_ip_pool"`
-	NatTable        *ebpf.MapSpec `ebpf:"nat_table"`
-	PortRangeInner  *ebpf.MapSpec `ebpf:"port_range_inner"`
-	PortRangeLookup *ebpf.MapSpec `ebpf:"port_range_lookup"`
-	TargetCidrs     *ebpf.MapSpec `ebpf:"target_cidrs"`
+	ExtIpPool           *ebpf.MapSpec `ebpf:"ext_ip_pool"`
+	NatTableIcmp        *ebpf.MapSpec `ebpf:"nat_table_icmp"`
+	NatTableTcp         *ebpf.MapSpec `ebpf:"nat_table_tcp"`
+	NatTableUdp         *ebpf.MapSpec `ebpf:"nat_table_udp"`
+	PortRangeInner      *ebpf.MapSpec `ebpf:"port_range_inner"`
+	PortRangeLookupIcmp *ebpf.MapSpec `ebpf:"port_range_lookup_icmp"`
+	PortRangeLookupTcp  *ebpf.MapSpec `ebpf:"port_range_lookup_tcp"`
+	PortRangeLookupUdp  *ebpf.MapSpec `ebpf:"port_range_lookup_udp"`
+	TargetCidrs         *ebpf.MapSpec `ebpf:"target_cidrs"`
 }
 
 // RevnatIngressVariableSpecs contains global variables before they are loaded into the kernel.
@@ -130,19 +134,27 @@ func (o *RevnatIngressObjects) Close() error {
 //
 // It can be passed to LoadRevnatIngressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type RevnatIngressMaps struct {
-	ExtIpPool       *ebpf.Map `ebpf:"ext_ip_pool"`
-	NatTable        *ebpf.Map `ebpf:"nat_table"`
-	PortRangeInner  *ebpf.Map `ebpf:"port_range_inner"`
-	PortRangeLookup *ebpf.Map `ebpf:"port_range_lookup"`
-	TargetCidrs     *ebpf.Map `ebpf:"target_cidrs"`
+	ExtIpPool           *ebpf.Map `ebpf:"ext_ip_pool"`
+	NatTableIcmp        *ebpf.Map `ebpf:"nat_table_icmp"`
+	NatTableTcp         *ebpf.Map `ebpf:"nat_table_tcp"`
+	NatTableUdp         *ebpf.Map `ebpf:"nat_table_udp"`
+	PortRangeInner      *ebpf.Map `ebpf:"port_range_inner"`
+	PortRangeLookupIcmp *ebpf.Map `ebpf:"port_range_lookup_icmp"`
+	PortRangeLookupTcp  *ebpf.Map `ebpf:"port_range_lookup_tcp"`
+	PortRangeLookupUdp  *ebpf.Map `ebpf:"port_range_lookup_udp"`
+	TargetCidrs         *ebpf.Map `ebpf:"target_cidrs"`
 }
 
 func (m *RevnatIngressMaps) Close() error {
 	return _RevnatIngressClose(
 		m.ExtIpPool,
-		m.NatTable,
+		m.NatTableIcmp,
+		m.NatTableTcp,
+		m.NatTableUdp,
 		m.PortRangeInner,
-		m.PortRangeLookup,
+		m.PortRangeLookupIcmp,
+		m.PortRangeLookupTcp,
+		m.PortRangeLookupUdp,
 		m.TargetCidrs,
 	)
 }

@@ -154,10 +154,13 @@ int snat_egress(struct __sk_buff *skb) {
         .nat_port = nat_port,
         .server_ip = iph->daddr,
         .server_port = server_port,
-        .proto = iph->protocol,
     };
     struct nat_val nv = {.pod_port = pod_port};
-    bpf_map_update_elem(&nat_table, &nk, &nv, BPF_ANY);
+    if (iph->protocol == IPPROTO_TCP) {
+      bpf_map_update_elem(&nat_table_tcp, &nk, &nv, BPF_ANY);
+    } else {
+      bpf_map_update_elem(&nat_table_udp, &nk, &nv, BPF_ANY);
+    }
   }
 
   // rewrite headers before csum helpers: bpf_l3/l4_csum_replace call

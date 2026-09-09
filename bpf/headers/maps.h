@@ -3,11 +3,10 @@
 
 struct nat_key {
   __be32 pod_ip;
-  __be16 nat_port;
   __be32 server_ip;
+  __be16 nat_port;
   __be16 server_port;
-  __u8 proto;
-  __u8 pad[3]; /* verifier does not allow uninitialized bytes */
+  // total 12 bytes, no padding needed
 };
 
 struct nat_val {
@@ -19,12 +18,28 @@ struct lpm_key {
   __be32 addr;
 };
 
+/// Per-protocol NAT tables
+
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
   __uint(max_entries, 65536);
   __type(key, struct nat_key);
   __type(value, struct nat_val);
-} nat_table SEC(".maps");
+} nat_table_tcp SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(max_entries, 65536);
+  __type(key, struct nat_key);
+  __type(value, struct nat_val);
+} nat_table_udp SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_LRU_HASH);
+  __uint(max_entries, 65536);
+  __type(key, struct nat_key);
+  __type(value, struct nat_val);
+} nat_table_icmp SEC(".maps");
 
 struct {
   __uint(type, BPF_MAP_TYPE_LPM_TRIE);

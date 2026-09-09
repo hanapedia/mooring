@@ -48,22 +48,28 @@ func Load(iface string) error {
 	revnatObjs := &mooringbpf.RevnatIngressObjects{}
 	if err := revnatSpec.LoadAndAssign(revnatObjs, &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
-			"nat_table":    snatObjs.NatTable,
-			"target_cidrs": snatObjs.TargetCidrs,
+			"nat_table_tcp":  snatObjs.NatTableTcp,
+			"nat_table_udp":  snatObjs.NatTableUdp,
+			"nat_table_icmp": snatObjs.NatTableIcmp,
+			"target_cidrs":   snatObjs.TargetCidrs,
 		},
 	}); err != nil {
 		return fmt.Errorf("load revnat_ingress: %w", err)
 	}
 	defer revnatObjs.Close()
 
-	// Pin maps. target_cidrs is shared, so we only pin snatObjs' copy.
+	// Pin maps. Shared maps (nat_table_*, target_cidrs) are pinned from snatObjs.
 	for name, m := range map[string]*ebpf.Map{
-		"snat_config":       snatObjs.SnatConfig,
-		"nat_table":         snatObjs.NatTable,
-		"outbound_sessions": snatObjs.OutboundSessions,
-		"target_cidrs":      snatObjs.TargetCidrs,
-		"ext_ip_pool":       revnatObjs.ExtIpPool,
-		"port_range_lookup": revnatObjs.PortRangeLookup,
+		"snat_config":              snatObjs.SnatConfig,
+		"nat_table_tcp":            snatObjs.NatTableTcp,
+		"nat_table_udp":            snatObjs.NatTableUdp,
+		"nat_table_icmp":           snatObjs.NatTableIcmp,
+		"outbound_sessions":        snatObjs.OutboundSessions,
+		"target_cidrs":             snatObjs.TargetCidrs,
+		"ext_ip_pool":              revnatObjs.ExtIpPool,
+		"port_range_lookup_tcp":    revnatObjs.PortRangeLookupTcp,
+		"port_range_lookup_udp":    revnatObjs.PortRangeLookupUdp,
+		"port_range_lookup_icmp":   revnatObjs.PortRangeLookupIcmp,
 	} {
 		if err := m.Pin(filepath.Join(mapsDir, name)); err != nil {
 			return fmt.Errorf("pin map %s: %w", name, err)

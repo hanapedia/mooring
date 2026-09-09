@@ -25,13 +25,27 @@ struct port_range_inner_t {
   __type(value, __be32); // pod ip network byte order
 } port_range_inner SEC(".maps");
 
-// maps
+/// per protocol maps lookup pod ip using ext ip and nat port
 struct {
   __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
   __uint(max_entries, MAX_EXT_IPS);
   __type(key, __be32); // ext_ip network byte order
   __array(values, struct port_range_inner_t);
-} port_range_lookup SEC(".maps");
+} port_range_lookup_tcp SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
+  __uint(max_entries, MAX_EXT_IPS);
+  __type(key, __be32); // ext_ip network byte order
+  __array(values, struct port_range_inner_t);
+} port_range_lookup_udp SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH_OF_MAPS);
+  __uint(max_entries, MAX_EXT_IPS);
+  __type(key, __be32); // ext_ip network byte order
+  __array(values, struct port_range_inner_t);
+} port_range_lookup_icmp SEC(".maps");
 
 // Re-derives packet pointers from skb so callers that have already called csum
 // helpers (which invalidate PTR_TO_PACKET registers) can safely call this.
@@ -52,12 +66,18 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
   // look up nat_table to see if the pod is local
   struct nat_key nk = {
       .pod_ip = iph->daddr,
-      .nat_port = nat_port,
       .server_ip = iph->saddr,
+      .nat_port = nat_port,
       .server_port = server_port,
-      .proto = iph->protocol,
   };
-  struct nat_val *nv = bpf_map_lookup_elem(&nat_table, &nk);
+  struct nat_val *nv;
+
+  // look up per protocol NAT tables (TCP & UDP for now)
+  if (iph->protocol == IPPROTO_TCP) {
+    nv = bpf_map_lookup_elem(&nat_table_tcp, &nk);
+  } else {
+    nv = bpf_map_lookup_elem(&nat_table_udp, &nk);
+  }
   if (!nv) {
     bpf_printk("revnat: stage2 not-local ifindex=%u src=%x dst=%x port=%u\n",
                skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
@@ -175,9 +195,14 @@ int revnat_ingress(struct __sk_buff *skb) {
              skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
              bpf_ntohs(nat_port));
 
-  // lookup the port range to find pod ip
+  // lookup per-protocol port range to find pod ip
   __be32 ext_ip = iph->daddr;
-  void *inner = bpf_map_lookup_elem(&port_range_lookup, &ext_ip);
+  void *inner;
+  if (iph->protocol == IPPROTO_TCP) {
+    inner = bpf_map_lookup_elem(&port_range_lookup_tcp, &ext_ip);
+  } else {
+    inner = bpf_map_lookup_elem(&port_range_lookup_udp, &ext_ip);
+  }
   if (!inner) {
     bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
                bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));

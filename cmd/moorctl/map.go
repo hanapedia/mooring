@@ -86,6 +86,7 @@ var (
 	prPodIP     string
 	prPortStart uint16
 	prPortEnd   uint16
+	prProto     string
 )
 
 var portRangeAddCmd = &cobra.Command{
@@ -93,6 +94,8 @@ var portRangeAddCmd = &cobra.Command{
 	Short: "Expand a port range into port_range_lookup (one entry per port)",
 	RunE:  runPortRangeAdd,
 }
+
+var allProtos = []uint8{6, 17, 1} // tcp, udp, icmp
 
 func runPortRangeAdd(_ *cobra.Command, _ []string) error {
 	extIP := net.ParseIP(prExtIP).To4()
@@ -106,7 +109,33 @@ func runPortRangeAdd(_ *cobra.Command, _ []string) error {
 	if prPortStart > prPortEnd {
 		return fmt.Errorf("--port-start must be <= --port-end")
 	}
-	return maps.AddPortRange(extIP, podIP, prPortStart, prPortEnd)
+	protos := allProtos
+	if prProto != "" {
+		proto, err := parseProto(prProto)
+		if err != nil {
+			return err
+		}
+		protos = []uint8{proto}
+	}
+	for _, proto := range protos {
+		if err := maps.AddPortRange(extIP, podIP, prPortStart, prPortEnd, proto); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseProto(s string) (uint8, error) {
+	switch s {
+	case "tcp":
+		return 6, nil
+	case "udp":
+		return 17, nil
+	case "icmp":
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("invalid --proto %q (want tcp, udp, or icmp)", s)
+	}
 }
 
 // ── init ──────────────────────────────────────────────────────────────────────
@@ -145,6 +174,7 @@ func init() {
 	portRangeAddCmd.Flags().StringVar(&prPodIP, "pod-ip", "", "pod IP (required)")
 	portRangeAddCmd.Flags().Uint16Var(&prPortStart, "port-start", 0, "first port in range (required)")
 	portRangeAddCmd.Flags().Uint16Var(&prPortEnd, "port-end", 0, "last port in range (required)")
+	portRangeAddCmd.Flags().StringVar(&prProto, "proto", "", "protocol: tcp, udp, or icmp (default: all)")
 	_ = portRangeAddCmd.MarkFlagRequired("ext-ip")
 	_ = portRangeAddCmd.MarkFlagRequired("pod-ip")
 	_ = portRangeAddCmd.MarkFlagRequired("port-start")
