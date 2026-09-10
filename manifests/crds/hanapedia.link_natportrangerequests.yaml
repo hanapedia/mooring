@@ -47,9 +47,10 @@ spec:
                 type: string
               podNamespace:
                 type: string
-              portRangeSize:
-                description: PortRangeSize overrides NATConfig.defaultPortRangeSize
-                  for this pod.
+              portRangeCount:
+                description: |-
+                  PortRangeCount is the number of fixed-size blocks to allocate per external IP.
+                  Defaults to 1 if unset.
                 format: int32
                 type: integer
             required:

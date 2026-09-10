@@ -7,9 +7,9 @@ import (
 type NATConfigSpec struct {
 	// ExternalIPPool is the list of external IP CIDRs available for SNAT.
 	ExternalIPPool []string `json:"externalIPPool"`
-	// DefaultPortRangeSize is the number of ports allocated per pod when
-	// NATPortRangeRequest does not specify portRangeSize.
-	DefaultPortRangeSize int32 `json:"defaultPortRangeSize"`
+	// PortRangeSize is the fixed number of ports per allocation block.
+	// All pods under this NATConfig use the same block size.
+	PortRangeSize int32 `json:"portRangeSize"`
 	// TargetCIDRs lists the destination CIDRs that trigger SNAT.
 	TargetCIDRs []string `json:"targetCIDRs"`
 	// PodSelector selects pods managed by this NATConfig.

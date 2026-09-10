@@ -104,7 +104,7 @@ metadata:
 spec:
   externalIPPool:
     - "203.0.113.0/28"
-  defaultPortRangeSize: 100
+  portRangeSize: 100
   targetCIDRs:
     - "0.0.0.0/0"
   podSelector:
@@ -115,7 +115,7 @@ spec:
 | Field | Description |
 |---|---|
 | `externalIPPool` | CIDR blocks providing the external (SNAT) IPs |
-| `defaultPortRangeSize` | Default number of ports per `(pod, external IP)` allocation |
+| `portRangeSize` | Fixed number of ports per allocation block; uniform across all pods in this NATConfig |
 | `targetCIDRs` | Destination CIDRs for which SNAT is applied |
 | `podSelector` | Selects client pods this NATConfig applies to |
 
@@ -170,7 +170,7 @@ spec:
   podIP: 10.0.0.5
   nodeName: node-1
   natConfig: prod
-  portRangeSize: 100  # optional; defaults to NATConfig.spec.defaultPortRangeSize
+  portRangeCount: 1  # optional; number of fixed-size blocks per external IP; defaults to 1
 status:
   deletionGracePeriodExpiry: ""  # set by daemon on pod deletion
 ```
@@ -179,8 +179,10 @@ status:
 
 ### Operator (Deployment)
 
-- Watches `NATPortRangeRequest` resources; ensures a `NATPortRange` exists with non-overlapping
-  port range allocations for each request.
+- Watches `NATPortRangeRequest` resources; allocates `portRangeCount × len(externalIPPool)`
+  globally unique fixed-size block indices from an in-memory free-block pool per NATConfig and
+  creates the corresponding `NATPortRange`. Non-overlapping across external IPs is guaranteed by
+  construction — different block index = different port range.
 - Watches `NATConfig` changes; when `externalIPPool` changes, updates affected `NATPortRange`
   allocations in place.
 - Never deletes `NATPortRangeRequest` — the daemon owns its lifecycle.
@@ -204,6 +206,6 @@ BPF programs and maps are pinned to bpffs at `/sys/fs/bpf/mooring/`. On daemon r
 
 ## Limitations
 
-- **Max concurrent connections** per pod per external IP is bounded by the assigned port range size. High-churn pods should use a dedicated IP pool with a larger `defaultPortRangeSize`.
+- **Max concurrent connections** per pod per external IP is bounded by `portRangeSize × portRangeCount`. Pods needing more capacity should request a higher `portRangeCount` in their NATPortRangeRequest.
 - **BGP underlay with native pod routing is required.** Overlay networks are not supported.
 - **Cilium mode** requires Cilium with BPF host routing and CiliumDatapathPlugin. It may have ordering dependencies with other TC programs on the uplink and is tested as a secondary target.

@@ -118,27 +118,44 @@ target; the default mode is the reference implementation.
 
 ### Problem
 
-If the same NAT port number is used for the same pod across two different external IPs, the stage 2
-NAT table — keyed on `{pod-IP, NAT-port, server-IP, server-port}` — cannot distinguish the two
-connections.
+The stage 2 NAT table is keyed on `{pod-IP, NAT-port, server-IP, server-port}`. The external IP
+is absent from this key because stage 1 has already overwritten the packet destination by the time
+stage 2 runs. If the same NAT port were assigned to the same pod across two different external IPs,
+two distinct connections to the same server could produce identical keys — causing one to overwrite
+the other in the NAT table and breaking that connection.
 
-### Solution: non-overlapping ranges per (pod, external IP)
+### Solution: fixed-size blocks with globally unique indices
 
-The operator allocates a distinct, non-overlapping port range for each (pod, external IP) pair.
-For example:
+The port space `[minPort, maxPort]` for each external IP is divided into fixed-size blocks of
+`NATConfig.portRangeSize` ports. Each block index `k` maps to an unambiguous port range:
 
 ```
-pod-foo on 203.0.113.1 → ports [1000, 1099]
-pod-foo on 203.0.113.2 → ports [1100, 1199]
-pod-bar on 203.0.113.1 → ports [1200, 1299]
-pod-bar on 203.0.113.2 → ports [1300, 1399]
+block k → [minPort + k × portRangeSize,  minPort + (k+1) × portRangeSize − 1]
 ```
 
-Because ranges do not overlap across external IPs for the same pod, the NAT port implicitly
-encodes which external IP was used. The stage 2 NAT table key is always unambiguous.
+The operator maintains a **global free-block pool** per NATConfig. When a pod requests allocation,
+the operator draws `portRangeCount × len(externalIPPool)` consecutive indices from the pool and
+distributes `portRangeCount` to each external IP:
 
-Port exhaustion per external IP is an operational concern mitigated by provisioning separate IP
-pools for high-churn and low-churn client pods.
+```
+pod-foo requests portRangeCount=1, pool has 2 IPs, portRangeSize=100
+  → draw blocks [k, k+1]
+  → ext-ip-1: block k   → ports [1000, 1099]
+  → ext-ip-2: block k+1 → ports [1100, 1199]
+
+pod-bar requests portRangeCount=1
+  → draw blocks [k+2, k+3]
+  → ext-ip-1: block k+2 → ports [1200, 1299]
+  → ext-ip-2: block k+3 → ports [1300, 1399]
+```
+
+Because block indices are globally unique across the entire NATConfig, port ranges for a given pod
+are non-overlapping across all external IPs by construction — no explicit overlap check is needed.
+The NAT table key is always unambiguous.
+
+A pod needing more NAT capacity requests a higher `portRangeCount`; the block size itself is fixed
+per NATConfig and never overridden per-pod. Freed blocks are returned to the pool and reused,
+preventing port space exhaustion under pod churn.
 
 ---
 
@@ -158,7 +175,7 @@ metadata:
 spec:
   externalIPPool:
     - "203.0.113.0/28"
-  defaultPortRangeSize: 100
+  portRangeSize: 100
   targetCIDRs:
     - "0.0.0.0/0"
   podSelector:
@@ -169,7 +186,7 @@ spec:
 | Field | Description |
 |---|---|
 | `externalIPPool` | CIDR blocks providing the external (SNAT) IPs |
-| `defaultPortRangeSize` | Default number of ports per (pod, external IP) allocation |
+| `portRangeSize` | Fixed number of ports per allocation block; applies uniformly to all pods |
 | `targetCIDRs` | Destination CIDRs for which SNAT is applied |
 | `podSelector` | Selects client pods that this NATConfig applies to |
 
@@ -227,7 +244,7 @@ spec:
   podIP: 10.0.0.5
   nodeName: node-1
   natConfig: prod
-  portRangeSize: 100   # optional; defaults to NATConfig.spec.defaultPortRangeSize
+  portRangeCount: 1   # optional; number of fixed-size blocks per external IP; defaults to 1
 status:
   deletionGracePeriodExpiry: ""  # set by daemon on pod deletion; request held until expiry
 ```
@@ -333,10 +350,12 @@ client pod  (src=server-IP:server-port, dst=pod-IP:pod-port ✓)
 Runs as a Deployment (single replica with leader election).
 
 Responsibilities:
-- Watches `NATPortRangeRequest` resources; ensures a corresponding `NATPortRange` exists with
-  non-overlapping port range allocations from the NATConfig's pool.
+- Watches `NATPortRangeRequest` resources; ensures a corresponding `NATPortRange` exists.
+- Allocates `portRangeCount × len(externalIPPool)` globally unique block indices from an
+  in-memory free-block pool per NATConfig; derives non-overlapping port ranges from those indices.
 - Creates `NATPortRange` with an owner reference to the `NATPortRangeRequest` so Kubernetes GC
-  handles deletion automatically.
+  handles deletion automatically; returns block indices to the free pool when the NATPortRange
+  is garbage-collected.
 - Watches `NATConfig` changes; when `externalIPPool` changes, updates the `allocations` slice of
   all affected `NATPortRange` resources in place (no delete-and-recreate).
 - The operator never deletes `NATPortRangeRequest`; the daemon owns its lifecycle.

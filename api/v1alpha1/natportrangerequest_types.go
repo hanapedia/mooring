@@ -10,8 +10,9 @@ type NATPortRangeRequestSpec struct {
 	PodIP        string `json:"podIP"`
 	NodeName     string `json:"nodeName"`
 	NATConfig    string `json:"natConfig"`
-	// PortRangeSize overrides NATConfig.defaultPortRangeSize for this pod.
-	PortRangeSize *int32 `json:"portRangeSize,omitempty"`
+	// PortRangeCount is the number of fixed-size blocks to allocate per external IP.
+	// Defaults to 1 if unset.
+	PortRangeCount *int32 `json:"portRangeCount,omitempty"`
 }
 
 type NATPortRangeRequestStatus struct {

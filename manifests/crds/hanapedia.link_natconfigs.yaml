@@ -37,12 +37,6 @@ spec:
             type: object
           spec:
             properties:
-              defaultPortRangeSize:
-                description: |-
-                  DefaultPortRangeSize is the number of ports allocated per pod when
-                  NATPortRangeRequest does not specify portRangeSize.
-                format: int32
-                type: integer
               externalIPPool:
                 description: ExternalIPPool is the list of external IP CIDRs available
                   for SNAT.
@@ -95,6 +89,12 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              portRangeSize:
+                description: |-
+                  PortRangeSize is the fixed number of ports per allocation block.
+                  All pods under this NATConfig use the same block size.
+                format: int32
+                type: integer
               targetCIDRs:
                 description: TargetCIDRs lists the destination CIDRs that trigger
                   SNAT.
@@ -102,9 +102,9 @@ spec:
                   type: string
                 type: array
             required:
-            - defaultPortRangeSize
             - externalIPPool
             - podSelector
+            - portRangeSize
             - targetCIDRs
             type: object
         type: object
