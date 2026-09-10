@@ -144,15 +144,17 @@ pools for high-churn and low-churn client pods.
 
 ## Custom Resources
 
-### Gateway
+API group: `hanapedia.link/v1alpha1`.
+
+### NATConfig
 
 Cluster-scoped. Defines the egress policy for a set of client pods.
 
 ```yaml
-apiVersion: mooring.io/v1alpha1
-kind: Gateway
+apiVersion: hanapedia.link/v1alpha1
+kind: NATConfig
 metadata:
-  name: prod-gateway
+  name: prod
 spec:
   externalIPPool:
     - "203.0.113.0/28"
@@ -169,24 +171,30 @@ spec:
 | `externalIPPool` | CIDR blocks providing the external (SNAT) IPs |
 | `defaultPortRangeSize` | Default number of ports per (pod, external IP) allocation |
 | `targetCIDRs` | Destination CIDRs for which SNAT is applied |
-| `podSelector` | Selects client pods that this Gateway applies to |
+| `podSelector` | Selects client pods that this NATConfig applies to |
 
-### MasqPortRange
+### NATPortRange
 
-Cluster-scoped. Created by the operator; one per client pod. Records all port range allocations
-for that pod across every external IP in the pool.
+Cluster-scoped. Created by the operator when a NATPortRangeRequest appears; one per (pod, NATConfig)
+pair. Records all port range allocations for that pod across every external IP in the pool.
+Named `{podNamespace}-{podName}-{natConfigName}`. Owned by the corresponding NATPortRangeRequest
+(deleted by Kubernetes GC when the request is deleted).
 
 ```yaml
-apiVersion: mooring.io/v1alpha1
-kind: MasqPortRange
+apiVersion: hanapedia.link/v1alpha1
+kind: NATPortRange
 metadata:
-  name: pod-foo-prod-gateway
+  name: default-pod-foo-prod
+  ownerReferences:
+    - apiVersion: hanapedia.link/v1alpha1
+      kind: NATPortRangeRequest
+      name: default-pod-foo-prod
 spec:
   podName: pod-foo
   podNamespace: default
   podIP: 10.0.0.5
   nodeName: node-1
-  gateway: prod-gateway
+  natConfig: prod
   allocations:
     - externalIP: 203.0.113.1
       portStart: 1000
@@ -194,32 +202,34 @@ spec:
     - externalIP: 203.0.113.2
       portStart: 1100
       portEnd: 1199
-status:
-  deletionGracePeriodExpiry: ""   # set when pod is deleted; range not freed until this time
 ```
 
-All daemon pods on every node watch `MasqPortRange` resources and sync them into the stage 1
-port-lookup BPF map.
+All daemon pods on every node watch `NATPortRange` resources and sync them into the stage 1
+port-range lookup BPF map. When `externalIPPool` changes on the NATConfig, the operator updates
+the `allocations` slice in place — no delete-and-recreate is required.
 
-### MasqPortRangeRequest
+### NATPortRangeRequest
 
-Namespace-scoped. Created by the daemon on the node where a new client pod starts. The operator
-watches these, allocates ranges, creates the corresponding `MasqPortRange`, and deletes the
-request.
+Cluster-scoped. Created by the daemon on the node where a new client pod starts and destroyed by
+the daemon after the pod's deletion grace period expires. Named `{podNamespace}-{podName}-{natConfigName}`.
+
+The request exists for the entire lifetime of the client pod. The operator watches it and ensures
+a corresponding `NATPortRange` exists at all times.
 
 ```yaml
-apiVersion: mooring.io/v1alpha1
-kind: MasqPortRangeRequest
+apiVersion: hanapedia.link/v1alpha1
+kind: NATPortRangeRequest
 metadata:
-  name: pod-foo-prod-gateway
-  namespace: default
+  name: default-pod-foo-prod
 spec:
   podName: pod-foo
   podNamespace: default
   podIP: 10.0.0.5
   nodeName: node-1
-  gateway: prod-gateway
-  portRangeSize: 100   # optional; defaults to Gateway.spec.defaultPortRangeSize
+  natConfig: prod
+  portRangeSize: 100   # optional; defaults to NATConfig.spec.defaultPortRangeSize
+status:
+  deletionGracePeriodExpiry: ""  # set by daemon on pod deletion; request held until expiry
 ```
 
 ---
@@ -248,7 +258,7 @@ One array map per external IP, indexed by port number (size 65536):
 |---|---|
 | NAT-port (0–65535) | pod-IP (0 if unallocated) |
 
-Type: `BPF_MAP_TYPE_ARRAY`. Updated by each daemon when `MasqPortRange` resources change.
+Type: `BPF_MAP_TYPE_ARRAY`. Updated by each daemon when `NATPortRange` resources change.
 
 ### SNAT config map (per node, outbound node only)
 
@@ -259,7 +269,7 @@ Provides the outbound BPF program with the port ranges for each local client pod
 | Key: `pod-IP` | Client pod |
 | Value: `[{externalIP, portStart, portEnd, nextPort}, ...]` | All allocated ranges; `nextPort` is an atomic counter for port selection |
 
-Type: `BPF_MAP_TYPE_HASH`. Updated by the daemon when `MasqPortRange` resources change.
+Type: `BPF_MAP_TYPE_HASH`. Updated by the daemon when `NATPortRange` resources change.
 
 ---
 
@@ -323,22 +333,30 @@ client pod  (src=server-IP:server-port, dst=pod-IP:pod-port ✓)
 Runs as a Deployment (single replica with leader election).
 
 Responsibilities:
-- Watches `MasqPortRangeRequest` resources.
-- Allocates non-overlapping port ranges per (pod, external IP) pair from the Gateway's pool.
-- Creates `MasqPortRange` resources.
-- Enforces the grace period on `MasqPortRange` deletion: sets
-  `status.deletionGracePeriodExpiry` when a pod is deleted, and only removes the resource after
-  the expiry.
+- Watches `NATPortRangeRequest` resources; ensures a corresponding `NATPortRange` exists with
+  non-overlapping port range allocations from the NATConfig's pool.
+- Creates `NATPortRange` with an owner reference to the `NATPortRangeRequest` so Kubernetes GC
+  handles deletion automatically.
+- Watches `NATConfig` changes; when `externalIPPool` changes, updates the `allocations` slice of
+  all affected `NATPortRange` resources in place (no delete-and-recreate).
+- The operator never deletes `NATPortRangeRequest`; the daemon owns its lifecycle.
 
 ### Daemon
 
 Runs as a DaemonSet on all nodes.
 
 Responsibilities:
-- Watches pods with matching Gateway `podSelector`; creates `MasqPortRangeRequest` for new pods.
-- Watches `MasqPortRange` resources; syncs allocations into the SNAT config map and port-range
-  lookup map.
-- Runs a BGP speaker that advertises all external IPs from all Gateways.
+- Watches node-local pods (field selector `spec.nodeName={NODE_NAME}`); on pod add, creates
+  `NATPortRangeRequest` for each matching NATConfig; on pod delete, sets
+  `NATPortRangeRequest.Status.DeletionGracePeriodExpiry` to hold port ranges for 240 s (to cover
+  `TIME_WAIT` expiry).
+- Watches `NATPortRangeRequest`; after `DeletionGracePeriodExpiry` passes, deletes the request
+  (Kubernetes GC then deletes the owned `NATPortRange`).
+- Watches `NATConfig` selector changes; reconciles local pods to create or retire
+  `NATPortRangeRequest` resources.
+- Watches `NATPortRange` resources; syncs allocations into the SNAT config map (local node only)
+  and the per-protocol port-range lookup maps (all nodes).
+- Runs a BGP speaker that advertises all external IPs from all NATConfigs.
 - **Default mode**: attaches TC BPF programs to the node uplink once at startup via netlink; no
   per-pod veth management; conntrack is bypassed via `bpf_redirect_neigh` on the transit path
   (no iptables rules required).
@@ -352,22 +370,33 @@ Responsibilities:
 ### New pod startup
 
 1. Pod is scheduled on a node and its network namespace is configured by the CNI plugin.
-2. Daemon on that node detects the new pod (via pod informer) and creates a
-   `MasqPortRangeRequest`.
-3. Operator allocates port ranges and creates a `MasqPortRange`.
-4. Daemon on every node syncs the new `MasqPortRange` into the port-range lookup map.
-5. Daemon on the pod's node syncs the new allocation into the SNAT config map. No BPF program
-   attachment is needed in default mode — the uplink programs are already running. In Cilium mode,
-   the pod endpoint is registered via CiliumDatapathPlugin.
+2. Daemon on that node detects the new pod (via pod informer, filtered by node field selector)
+   and creates a `NATPortRangeRequest` for each matching NATConfig.
+3. Operator sees the `NATPortRangeRequest`, allocates port ranges, and creates a `NATPortRange`
+   with an owner reference back to the request.
+4. Daemons on every node see the new `NATPortRange` and sync its allocations into the
+   per-protocol port-range lookup maps.
+5. Daemon on the pod's node additionally syncs the allocation into the SNAT config map. No BPF
+   program attachment is needed in default mode — the uplink programs are already running.
 6. Pod is marked ready.
 
 ### Pod deletion
 
-1. Pod is deleted; daemon detects deletion.
-2. Operator sets `status.deletionGracePeriodExpiry` on the pod's `MasqPortRange` (default: 240s,
-   to cover `TIME_WAIT` expiry).
-3. After expiry, operator deletes the `MasqPortRange`.
-4. Daemons on all nodes sync the deletion out of the port-range lookup map.
+1. Pod is deleted; daemon on the pod's node detects the deletion.
+2. Daemon sets `NATPortRangeRequest.Status.DeletionGracePeriodExpiry = now + 240s` (covers
+   `TIME_WAIT` expiry) and does nothing else immediately.
+3. After expiry, the daemon's `NATPortRangeRequest` reconciler deletes the request.
+4. Kubernetes GC deletes the owned `NATPortRange`.
+5. Daemons on all nodes see the `NATPortRange` deletion and clear the port-range lookup map
+   entries. Daemon on the pod's node also clears the SNAT config map entry.
+
+### ExternalIPPool change
+
+1. Operator detects the change on `NATConfig`.
+2. For each `NATPortRange` referencing that NATConfig, the operator updates `spec.allocations`
+   in place: removes entries for IPs no longer in the pool, adds entries for new IPs.
+3. Daemons see the `NATPortRange` update and reconcile BPF maps accordingly (remove stale
+   entries, add new ones). No resource deletion or recreation is required.
 
 ---
 
@@ -376,7 +405,7 @@ Responsibilities:
 BPF programs and maps are pinned to bpffs (`/sys/fs/bpf/mooring/`). On daemon restart:
 
 - Existing BPF programs continue running — in-flight connections are unaffected.
-- The daemon re-attaches to pinned maps and reconciles their state against current `MasqPortRange`
+- The daemon re-attaches to pinned maps and reconciles their state against current `NATPortRange`
   resources in the API server.
 - No packet loss occurs during daemon rollout.
 

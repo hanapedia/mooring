@@ -90,15 +90,17 @@ When enabled, the daemon uses the CiliumDatapathPlugin API to attach programs in
 
 ## Custom Resources
 
-### Gateway
+API group: `hanapedia.link/v1alpha1`.
+
+### NATConfig
 
 Cluster-scoped. Defines the egress policy and external IP pool for a set of client pods.
 
 ```yaml
-apiVersion: mooring.io/v1alpha1
-kind: Gateway
+apiVersion: hanapedia.link/v1alpha1
+kind: NATConfig
 metadata:
-  name: prod-gateway
+  name: prod
 spec:
   externalIPPool:
     - "203.0.113.0/28"
@@ -115,23 +117,30 @@ spec:
 | `externalIPPool` | CIDR blocks providing the external (SNAT) IPs |
 | `defaultPortRangeSize` | Default number of ports per `(pod, external IP)` allocation |
 | `targetCIDRs` | Destination CIDRs for which SNAT is applied |
-| `podSelector` | Selects client pods this Gateway applies to |
+| `podSelector` | Selects client pods this NATConfig applies to |
 
-### MasqPortRange
+### NATPortRange
 
-Cluster-scoped. Created by the operator; one per client pod. Records all port range allocations for that pod across every external IP in the pool. All daemon pods watch this resource and sync it into the stage 1 port-range lookup BPF map.
+Cluster-scoped. Created by the operator; one per `(pod, NATConfig)` pair. Records all port range
+allocations for that pod across every external IP in the pool. Named
+`{podNamespace}-{podName}-{natConfigName}`. Owned by the corresponding `NATPortRangeRequest` —
+Kubernetes GC deletes it automatically when the request is deleted.
+
+All daemon pods watch this resource and sync it into the stage 1 port-range lookup BPF maps.
+When `externalIPPool` changes, the operator updates `allocations` in place rather than deleting
+and recreating the resource.
 
 ```yaml
-apiVersion: mooring.io/v1alpha1
-kind: MasqPortRange
+apiVersion: hanapedia.link/v1alpha1
+kind: NATPortRange
 metadata:
-  name: pod-foo-prod-gateway
+  name: default-pod-foo-prod
 spec:
   podName: pod-foo
   podNamespace: default
   podIP: 10.0.0.5
   nodeName: node-1
-  gateway: prod-gateway
+  natConfig: prod
   allocations:
     - externalIP: 203.0.113.1
       portStart: 1000
@@ -139,48 +148,59 @@ spec:
     - externalIP: 203.0.113.2
       portStart: 1100
       portEnd: 1199
-status:
-  deletionGracePeriodExpiry: ""  # set on pod deletion; range held until expiry
 ```
 
-### MasqPortRangeRequest
+### NATPortRangeRequest
 
-Namespace-scoped. Created by the daemon when a new client pod starts. The operator allocates port ranges, creates the corresponding `MasqPortRange`, and deletes the request.
+Cluster-scoped. Created by the daemon when a new client pod starts; exists for the pod's entire
+lifetime. Named `{podNamespace}-{podName}-{natConfigName}`.
+
+The operator ensures a `NATPortRange` exists for every `NATPortRangeRequest`. On pod deletion,
+the daemon sets `status.deletionGracePeriodExpiry` (default 240 s, to cover `TIME_WAIT` expiry)
+and deletes the request after expiry. Kubernetes GC then removes the owned `NATPortRange`.
 
 ```yaml
-apiVersion: mooring.io/v1alpha1
-kind: MasqPortRangeRequest
+apiVersion: hanapedia.link/v1alpha1
+kind: NATPortRangeRequest
 metadata:
-  name: pod-foo-prod-gateway
-  namespace: default
+  name: default-pod-foo-prod
 spec:
   podName: pod-foo
   podNamespace: default
   podIP: 10.0.0.5
   nodeName: node-1
-  gateway: prod-gateway
-  portRangeSize: 100  # optional; defaults to Gateway.spec.defaultPortRangeSize
+  natConfig: prod
+  portRangeSize: 100  # optional; defaults to NATConfig.spec.defaultPortRangeSize
+status:
+  deletionGracePeriodExpiry: ""  # set by daemon on pod deletion
 ```
 
 ## Components
 
 ### Operator (Deployment)
 
-- Watches `MasqPortRangeRequest` resources and allocates non-overlapping port ranges.
-- Creates `MasqPortRange` resources.
-- Enforces a deletion grace period (default 240 s, to cover `TIME_WAIT` expiry) before freeing port ranges.
+- Watches `NATPortRangeRequest` resources; ensures a `NATPortRange` exists with non-overlapping
+  port range allocations for each request.
+- Watches `NATConfig` changes; when `externalIPPool` changes, updates affected `NATPortRange`
+  allocations in place.
+- Never deletes `NATPortRangeRequest` — the daemon owns its lifecycle.
 
 ### Daemon (DaemonSet)
 
-- Watches pods matching Gateway selectors; creates `MasqPortRangeRequest` for new pods.
-- Syncs `MasqPortRange` resources into SNAT config and port-range lookup BPF maps.
-- Runs a BGP speaker that advertises all external IPs from all Gateways.
-- Attaches TC BPF programs to the node uplink at startup via netlink (default mode; no per-pod TC attachment); uses CiliumDatapathPlugin in Cilium mode.
+- Watches node-local pods (field selector on `spec.nodeName`); creates `NATPortRangeRequest` for
+  new pods matching a NATConfig selector; sets the deletion grace period on pod removal.
+- Deletes `NATPortRangeRequest` after its grace period expires.
+- Watches `NATConfig` selector changes; reconciles local pods to create or retire requests.
+- Syncs `NATPortRange` resources into SNAT config (local node) and per-protocol port-range lookup
+  BPF maps (all nodes).
+- Runs a BGP speaker that advertises all external IPs from all NATConfigs.
+- Attaches TC BPF programs to the node uplink at startup via netlink (default mode; no per-pod TC
+  attachment); uses CiliumDatapathPlugin in Cilium mode.
 - Performs periodic NAT table cleanup for stale entries.
 
 ## Update Resiliency
 
-BPF programs and maps are pinned to bpffs at `/sys/fs/bpf/mooring/`. On daemon restart, existing programs keep running and in-flight connections are unaffected. The daemon re-attaches to pinned maps and reconciles state against the API server. Node-level updates (kernel upgrades, etc.) require pod eviction, handled by the normal grace period mechanism.
+BPF programs and maps are pinned to bpffs at `/sys/fs/bpf/mooring/`. On daemon restart, existing programs keep running and in-flight connections are unaffected. The daemon re-attaches to pinned maps and reconciles state against current `NATPortRange` resources. Node-level updates (kernel upgrades, etc.) require pod eviction, handled by the normal grace period mechanism.
 
 ## Limitations
 
