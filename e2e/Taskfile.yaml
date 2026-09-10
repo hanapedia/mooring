@@ -261,6 +261,7 @@ tasks:
       - |
         POD=$(kubectl get pod -n default -l app=domestic1-client -o name | head -1)
         kubectl exec -n default "${POD}" -- curl -s --max-time 10 192.168.10.100:8000
+        kubectl exec -n default "${POD}" -- ping -c 3 192.168.10.100
 
 
   mooring-add-client:

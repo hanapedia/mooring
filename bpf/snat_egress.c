@@ -71,8 +71,9 @@ int snat_egress(struct __sk_buff *skb) {
   if ((void *)(iph + 1) > data_end)
     return TC_ACT_OK;
 
-  // handle only tcp and udp (may want to handle icmp)
-  if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP)
+  // handle only tcp, udp, and icmp
+  if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP &&
+      iph->protocol != IPPROTO_ICMP)
     return TC_ACT_OK;
 
   // look up dest against target cidrs
@@ -97,13 +98,23 @@ int snat_egress(struct __sk_buff *skb) {
     pod_port = tcph->source;
     server_port = tcph->dest;
     csum_off = l4_off + offsetof(struct tcphdr, check);
-  } else {
+  } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
       return TC_ACT_OK;
     pod_port = udph->source;
     server_port = udph->dest;
     csum_off = l4_off + offsetof(struct udphdr, check);
+  } else { // ICMP (use port as id)
+    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    if ((void *)(icmph + 1) > data_end)
+      return TC_ACT_OK;
+    // handle only echo for now
+    if (icmph->type != ICMP_ECHO)
+      return TC_ACT_OK;
+    pod_port = icmph->un.echo.id;
+    server_port = 0;
+    csum_off = l4_off + offsetof(struct icmphdr, checksum);
   }
 
   // look up existing session before allocating a new port
@@ -158,8 +169,10 @@ int snat_egress(struct __sk_buff *skb) {
     struct nat_val nv = {.pod_port = pod_port};
     if (iph->protocol == IPPROTO_TCP) {
       bpf_map_update_elem(&nat_table_tcp, &nk, &nv, BPF_ANY);
-    } else {
+    } else if (iph->protocol == IPPROTO_UDP) {
       bpf_map_update_elem(&nat_table_udp, &nk, &nv, BPF_ANY);
+    } else { // ICMP
+      bpf_map_update_elem(&nat_table_icmp, &nk, &nv, BPF_ANY);
     }
   }
 
@@ -172,20 +185,30 @@ int snat_egress(struct __sk_buff *skb) {
     if ((void *)(tcph + 1) > data_end)
       return TC_ACT_OK;
     tcph->source = nat_port;
-  } else {
+  } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
       return TC_ACT_OK;
     udph->source = nat_port;
+  } else { // ICMP (uses port as id)
+    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    if ((void *)(icmph + 1) > data_end)
+      return TC_ACT_OK;
+    icmph->un.echo.id = nat_port;
   }
 
   // fix checksums — from/to values are passed explicitly so the order relative
   // to the header rewrites above does not affect correctness.
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
-  bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
-  bpf_l4_csum_replace(skb, csum_off, pod_ip, ext_ip,
-                      BPF_F_PSEUDO_HDR | sizeof(__be32));
-  bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
+  if (iph->protocol != IPPROTO_ICMP) {
+    bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
+    bpf_l4_csum_replace(skb, csum_off, pod_ip, ext_ip,
+                        BPF_F_PSEUDO_HDR | sizeof(__be32));
+    bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
+  } else {
+    bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
+    bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
+  }
 
   return TC_ACT_OK;
 }

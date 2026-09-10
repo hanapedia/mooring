@@ -75,8 +75,10 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
   // look up per protocol NAT tables (TCP & UDP for now)
   if (iph->protocol == IPPROTO_TCP) {
     nv = bpf_map_lookup_elem(&nat_table_tcp, &nk);
-  } else {
+  } else if (iph->protocol == IPPROTO_UDP) {
     nv = bpf_map_lookup_elem(&nat_table_udp, &nk);
+  } else { // ICMP
+    nv = bpf_map_lookup_elem(&nat_table_icmp, &nk);
   }
   if (!nv) {
     bpf_printk("revnat: stage2 not-local ifindex=%u src=%x dst=%x port=%u\n",
@@ -96,11 +98,16 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
     if ((void *)(tcph + 1) > data_end)
       return TC_ACT_OK;
     tcph->dest = pod_port;
-  } else {
+  } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
       return TC_ACT_OK;
     udph->dest = pod_port;
+  } else { // ICMP (use port as id)
+    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    if ((void *)(icmph + 1) > data_end)
+      return TC_ACT_OK;
+    icmph->un.echo.id = pod_port;
   }
 
   bpf_printk("revnat: stage2 local ifindex=%u src=%x dst=%x port=%u\n",
@@ -152,8 +159,9 @@ int revnat_ingress(struct __sk_buff *skb) {
   if (!bpf_map_lookup_elem(&target_cidrs, &slpm))
     return TC_ACT_OK;
 
-  // handle only tcp and udp (may want to handle icmp)
-  if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP)
+  // handle only tcp, udp, or icmp
+  if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP &&
+      iph->protocol != IPPROTO_ICMP)
     return TC_ACT_OK;
 
   // parse l4 header
@@ -168,13 +176,23 @@ int revnat_ingress(struct __sk_buff *skb) {
     nat_port = tcph->dest;
     server_port = tcph->source;
     csum_off = l4_off + offsetof(struct tcphdr, check);
-  } else {
+  } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
       return TC_ACT_OK;
     nat_port = udph->dest;
     server_port = udph->source;
     csum_off = l4_off + offsetof(struct udphdr, check);
+  } else { // ICMP (use port as id)
+    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    if ((void *)(icmph + 1) > data_end)
+      return TC_ACT_OK;
+    // handle only echo for now
+    if (icmph->type != ICMP_ECHOREPLY)
+      return TC_ACT_OK;
+    nat_port = icmph->un.echo.id;
+    server_port = 0;
+    csum_off = l4_off + offsetof(struct icmphdr, checksum);
   }
 
   // look up dest against ext ip pool
@@ -200,8 +218,10 @@ int revnat_ingress(struct __sk_buff *skb) {
   void *inner;
   if (iph->protocol == IPPROTO_TCP) {
     inner = bpf_map_lookup_elem(&port_range_lookup_tcp, &ext_ip);
-  } else {
+  } else if (iph->protocol == IPPROTO_UDP) {
     inner = bpf_map_lookup_elem(&port_range_lookup_udp, &ext_ip);
+  } else { // ICMP
+    inner = bpf_map_lookup_elem(&port_range_lookup_icmp, &ext_ip);
   }
   if (!inner) {
     bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
@@ -218,9 +238,13 @@ int revnat_ingress(struct __sk_buff *skb) {
   iph->daddr = pod_ip;
 
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
-  bpf_l3_csum_replace(skb, ip_csum, ext_ip, pod_ip, sizeof(__be32));
-  bpf_l4_csum_replace(skb, csum_off, ext_ip, pod_ip,
-                      BPF_F_PSEUDO_HDR | sizeof(__be32));
+  if (iph->protocol != IPPROTO_ICMP) {
+    bpf_l3_csum_replace(skb, ip_csum, ext_ip, pod_ip, sizeof(__be32));
+    bpf_l4_csum_replace(skb, csum_off, ext_ip, pod_ip,
+                        BPF_F_PSEUDO_HDR | sizeof(__be32));
+  } else {
+    bpf_l3_csum_replace(skb, ip_csum, ext_ip, pod_ip, sizeof(__be32));
+  }
 
   // do_port_revnat re-derives its own packet pointers from skb, so it is safe
   // to call after the csum helpers above have invalidated our iph pointer.
