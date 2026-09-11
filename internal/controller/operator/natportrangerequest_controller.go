@@ -171,6 +171,10 @@ func (r *NATPortRangeRequestReconciler) decreaseCount(
 	toFree := make(map[string][]uint16)
 	var newAllocs []v1alpha1.PortAllocation
 
+	// Only iterate current pool IPs. Allocations for IPs not in extIPs (removed
+	// from the pool since the NPR was created) are silently dropped here without
+	// being explicitly freed. The NATConfig controller will call RemoveIP for each
+	// dropped IP, which atomically wipes its block-index entry from the allocator.
 	for _, ip := range extIPs {
 		als := byIP[ip]
 		sort.Slice(als, func(i, j int) bool { return als[i].PortStart < als[j].PortStart })

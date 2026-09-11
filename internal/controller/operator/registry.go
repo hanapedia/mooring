@@ -25,6 +25,10 @@ func NewAllocatorRegistry() *AllocatorRegistry {
 // EnsureAllocator returns the existing allocator for natConfigName, or creates one
 // with blockSize. The allocator uses [allocator.MinPort, allocator.MaxPort] as its
 // port space. Returns an error only if the port space is invalid for blockSize.
+//
+// If an allocator already exists, blockSize is ignored — changing NATConfig.Spec.PortRangeSize
+// on a live NATConfig is not supported and requires a full delete+recreate of the NATConfig
+// and all its NATPortRanges.
 func (r *AllocatorRegistry) EnsureAllocator(natConfigName string, blockSize uint16) (*allocator.BlockAllocator, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

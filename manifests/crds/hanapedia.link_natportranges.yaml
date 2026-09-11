@@ -64,6 +64,9 @@ spec:
                 type: string
               podNamespace:
                 type: string
+              portRangeCount:
+                format: int32
+                type: integer
             required:
             - allocations
             - natConfig
@@ -71,6 +74,7 @@ spec:
             - podIP
             - podName
             - podNamespace
+            - portRangeCount
             type: object
         type: object
     served: true
