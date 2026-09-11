@@ -124,7 +124,9 @@ spec:
 Cluster-scoped. Created by the operator; one per `(pod, NATConfig)` pair. Records all port range
 allocations for that pod across every external IP in the pool. Named
 `{podNamespace}-{podName}-{natConfigName}`. Owned by the corresponding `NATPortRangeRequest` —
-Kubernetes GC deletes it automatically when the request is deleted.
+Kubernetes GC deletes it automatically when the request is deleted. Carries a finalizer
+(`mooring.hanapedia.link/allocation`) so the operator can reclaim block indices before GC removes
+the object.
 
 All daemon pods watch this resource and sync it into the stage 1 port-range lookup BPF maps.
 When `externalIPPool` changes, the operator updates `allocations` in place rather than deleting
@@ -135,19 +137,22 @@ apiVersion: hanapedia.link/v1alpha1
 kind: NATPortRange
 metadata:
   name: default-pod-foo-prod
+  finalizers:
+    - mooring.hanapedia.link/allocation
 spec:
   podName: pod-foo
   podNamespace: default
   podIP: 10.0.0.5
   nodeName: node-1
   natConfig: prod
+  portRangeCount: 1   # mirrored from NATPortRangeRequest; used by NATConfig controller
   allocations:
     - externalIP: 203.0.113.1
-      portStart: 1000
-      portEnd: 1099
+      portStart: 1300
+      portEnd: 1399
     - externalIP: 203.0.113.2
-      portStart: 1100
-      portEnd: 1199
+      portStart: 1700
+      portEnd: 1799
 ```
 
 ### NATPortRangeRequest
@@ -179,13 +184,21 @@ status:
 
 ### Operator (Deployment)
 
-- Watches `NATPortRangeRequest` resources; allocates `portRangeCount × len(externalIPPool)`
-  globally unique fixed-size block indices from an in-memory free-block pool per NATConfig and
-  creates the corresponding `NATPortRange`. Non-overlapping across external IPs is guaranteed by
-  construction — different block index = different port range.
-- Watches `NATConfig` changes; when `externalIPPool` changes, updates affected `NATPortRange`
-  allocations in place.
-- Never deletes `NATPortRangeRequest` — the daemon owns its lifecycle.
+- **Startup reconstruction**: before reconciling any `NATPortRangeRequest`, replays all existing
+  `NATPortRange` allocations into the in-memory allocator so new allocations never conflict with
+  existing ones — critical for correctness when the operator restarts with pending requests.
+- **NATPortRangeRequest controller**: ensures a `NATPortRange` exists for every request. Allocates
+  `portRangeCount` blocks per external IP from a per-NATConfig `BlockAllocator` (per-IP free sets;
+  different pods may share block indices on different IPs). Handles `portRangeCount` increases
+  (allocate delta per IP) and decreases (free excess blocks). Creates `NATPortRange` with an owner
+  reference and a finalizer for safe block reclamation.
+- **NATPortRange controller**: when GC marks a `NATPortRange` for deletion (triggered by
+  `NATPortRangeRequest` deletion), frees the allocated block indices back to the per-IP free sets
+  and removes the finalizer.
+- **NATConfig controller**: when `externalIPPool` changes, updates each affected `NATPortRange`
+  in place — adds allocations for new IPs, removes allocations for dropped IPs. Reads
+  `portRangeCount` from the `NATPortRange` spec directly; never reads `NATPortRangeRequest`.
+- Never creates, updates, or deletes `NATPortRangeRequest` — the daemon owns its lifecycle.
 
 ### Daemon (DaemonSet)
 

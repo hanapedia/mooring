@@ -124,7 +124,7 @@ stage 2 runs. If the same NAT port were assigned to the same pod across two diff
 two distinct connections to the same server could produce identical keys — causing one to overwrite
 the other in the NAT table and breaking that connection.
 
-### Solution: fixed-size blocks with globally unique indices
+### Solution: fixed-size blocks with per-IP free sets
 
 The port space `[minPort, maxPort]` for each external IP is divided into fixed-size blocks of
 `NATConfig.portRangeSize` ports. Each block index `k` maps to an unambiguous port range:
@@ -133,29 +133,34 @@ The port space `[minPort, maxPort]` for each external IP is divided into fixed-s
 block k → [minPort + k × portRangeSize,  minPort + (k+1) × portRangeSize − 1]
 ```
 
-The operator maintains a **global free-block pool** per NATConfig. When a pod requests allocation,
-the operator draws `portRangeCount × len(externalIPPool)` consecutive indices from the pool and
-distributes `portRangeCount` to each external IP:
+The operator maintains a **per-IP free-block set** (one per external IP per NATConfig) of
+available block indices. For a given pod, `AllocateForPod` draws `portRangeCount` indices from
+each IP's free set while maintaining a cross-IP exclusion set — no index is reused across the same
+pod's IPs. This guarantees the pod's port ranges are non-overlapping across all external IPs.
+
+Critically, **different pods may hold the same block index on different IPs simultaneously** — the
+constraint is per-pod, not global. This efficient reuse is what makes the per-IP free-set design
+preferable to a single global pool.
 
 ```
-pod-foo requests portRangeCount=1, pool has 2 IPs, portRangeSize=100
-  → draw blocks [k, k+1]
-  → ext-ip-1: block k   → ports [1000, 1099]
-  → ext-ip-2: block k+1 → ports [1100, 1199]
+portRangeCount=1, 2 external IPs, portRangeSize=100
 
-pod-bar requests portRangeCount=1
-  → draw blocks [k+2, k+3]
-  → ext-ip-1: block k+2 → ports [1200, 1299]
-  → ext-ip-2: block k+3 → ports [1300, 1399]
+pod-foo allocated:
+  ext-ip-1: block 3 → ports [1300, 1399]
+  ext-ip-2: block 7 → ports [1700, 1799]   ← indices 3 and 7 differ; non-overlapping ✓
+
+pod-bar allocated (same cluster, different pod):
+  ext-ip-1: block 7 → ports [1700, 1799]   ← block 7 free on ext-ip-1; reused ✓
+  ext-ip-2: block 3 → ports [1300, 1399]   ← block 3 free on ext-ip-2; reused ✓
+
+pod-foo on ext-ip-1 (block 3) and pod-bar on ext-ip-1 (block 7): non-overlapping ✓
+pod-foo's own indices across its IPs (3, 7) are distinct: NAT table unambiguous ✓
+pod-bar's own indices across its IPs (7, 3) are distinct: NAT table unambiguous ✓
 ```
-
-Because block indices are globally unique across the entire NATConfig, port ranges for a given pod
-are non-overlapping across all external IPs by construction — no explicit overlap check is needed.
-The NAT table key is always unambiguous.
 
 A pod needing more NAT capacity requests a higher `portRangeCount`; the block size itself is fixed
-per NATConfig and never overridden per-pod. Freed blocks are returned to the pool and reused,
-preventing port space exhaustion under pod churn.
+per NATConfig and never overridden per-pod. Freed blocks are returned to the per-IP free set as an
+idempotent map insertion (making double-free a safe no-op) and reused on the next allocation.
 
 ---
 
@@ -195,13 +200,16 @@ spec:
 Cluster-scoped. Created by the operator when a NATPortRangeRequest appears; one per (pod, NATConfig)
 pair. Records all port range allocations for that pod across every external IP in the pool.
 Named `{podNamespace}-{podName}-{natConfigName}`. Owned by the corresponding NATPortRangeRequest
-(deleted by Kubernetes GC when the request is deleted).
+(Kubernetes GC deletes it when the request is deleted). Carries a finalizer
+(`mooring.hanapedia.link/allocation`) so the operator can reclaim block indices before deletion.
 
 ```yaml
 apiVersion: hanapedia.link/v1alpha1
 kind: NATPortRange
 metadata:
   name: default-pod-foo-prod
+  finalizers:
+    - mooring.hanapedia.link/allocation
   ownerReferences:
     - apiVersion: hanapedia.link/v1alpha1
       kind: NATPortRangeRequest
@@ -212,13 +220,14 @@ spec:
   podIP: 10.0.0.5
   nodeName: node-1
   natConfig: prod
+  portRangeCount: 1   # mirrors the NPRR value; used by NATConfig controller without reading NPRR
   allocations:
     - externalIP: 203.0.113.1
-      portStart: 1000
-      portEnd: 1099
+      portStart: 1300
+      portEnd: 1399
     - externalIP: 203.0.113.2
-      portStart: 1100
-      portEnd: 1199
+      portStart: 1700
+      portEnd: 1799
 ```
 
 All daemon pods on every node watch `NATPortRange` resources and sync them into the stage 1
@@ -347,18 +356,75 @@ client pod  (src=server-IP:server-port, dst=pod-IP:pod-port ✓)
 
 ### Operator
 
-Runs as a Deployment (single replica with leader election).
+Runs as a Deployment (single replica with leader election). Owns three controllers and one startup
+runnable. Lookup and mutation flow is always top-down: NPRR → NATConfig → NPR (NPRR controller),
+NATConfig → NPR (NATConfig controller), NPR only (NPR controller). The operator never reads or
+mutates NATPortRangeRequest — the daemon owns its lifecycle.
 
-Responsibilities:
-- Watches `NATPortRangeRequest` resources; ensures a corresponding `NATPortRange` exists.
-- Allocates `portRangeCount × len(externalIPPool)` globally unique block indices from an
-  in-memory free-block pool per NATConfig; derives non-overlapping port ranges from those indices.
-- Creates `NATPortRange` with an owner reference to the `NATPortRangeRequest` so Kubernetes GC
-  handles deletion automatically; returns block indices to the free pool when the NATPortRange
-  is garbage-collected.
-- Watches `NATConfig` changes; when `externalIPPool` changes, updates the `allocations` slice of
-  all affected `NATPortRange` resources in place (no delete-and-recreate).
-- The operator never deletes `NATPortRangeRequest`; the daemon owns its lifecycle.
+#### Startup reconstruction
+
+A `ReconstructionRunnable` runs once immediately after the cache syncs, before any reconciler
+processes a single item:
+
+1. Lists all NATConfigs → creates a `BlockAllocator` per NATConfig (keyed by `portRangeSize`) →
+   calls `EnsureIP` for every IP in each pool.
+2. Lists all NATPortRanges (skipping those with `DeletionTimestamp`) → calls `MarkUsed` for every
+   allocation. Allocations for IPs no longer in the pool are skipped (NATConfig controller will
+   clean them up on its next reconcile).
+3. Closes the reconstruction gate channel → all blocked reconcilers unblock simultaneously.
+
+The NPRR controller blocks at the start of every `Reconcile` call on this channel. NATConfig and
+NPR controllers gate on it as well for a clean startup. This prevents allocation conflicts with
+NATPortRangeRequests that arrived while the operator was down.
+
+#### NATPortRangeRequest controller
+
+Drives `NATPortRange` toward the desired state derived from NPRR → NATConfig.
+
+- **Create** (no NPR exists): reads the NATConfig, expands `externalIPPool` CIDRs to individual
+  IPs, calls `AllocateForPod(extIPs, portRangeCount)` on the per-NATConfig `BlockAllocator`,
+  creates NPR with all allocations, `portRangeCount` mirrored in spec, owner reference to NPRR,
+  and the allocation finalizer. On Create failure, frees the just-allocated blocks and requeues.
+- **Update** (`portRangeCount` changed):
+  - *Increased*: calls `AllocateForIP(ip, delta, existingPortStarts)` for each IP, maintaining
+    the cross-IP exclusion invariant; appends new allocations to NPR and updates.
+  - *Decreased*: for each IP, sorts current allocations by `portStart`, keeps the first M (desired
+    count), frees the remainder; updates NPR.
+- **No-op** when NPR exists and `portRangeCount` matches.
+
+#### NATPortRange controller
+
+Handles block reclamation when GC marks NPR for deletion.
+
+- When `DeletionTimestamp` is set and the finalizer is present: reads `spec.allocations`, calls
+  `Free` on the per-NATConfig `BlockAllocator` to return all block indices to their per-IP free
+  sets, removes the finalizer, and updates the NPR. If the NATConfig's allocator is missing (the
+  NATConfig was deleted first), skips `Free` and removes the finalizer unconditionally.
+
+#### NATConfig controller
+
+Reconciles each NPR's allocations when `externalIPPool` changes. Reads `portRangeCount` directly
+from `NATPortRange.Spec` — never reads NATPortRangeRequest.
+
+- Uses a field index on `.spec.natConfig` to list all NPRs for the changed NATConfig.
+- For each NPR (skipping those with `DeletionTimestamp`):
+  - Computes `toAdd` (IPs in desired pool absent from NPR allocations) and `toRemove` (IPs in NPR
+    allocations absent from desired pool).
+  - Removes stale allocations, then calls `AllocateForIP(ip, NPR.Spec.PortRangeCount, existingPortStarts)`
+    for each new IP, maintaining cross-IP exclusion as new IPs are added in sequence.
+  - Updates NPR. On error, requeues (retried with full idempotency next pass).
+- After all NPRs are updated, calls `RemoveIP` on the allocator for each dropped IP.
+- On NATConfig deletion (`NotFound`): removes the allocator from the registry and returns.
+  The daemon handles NPRR deletion; GC cascades to NPR deletion; the NPR controller's finalizer
+  reclaims the blocks.
+
+#### Testing
+
+Controller integration tests use `envtest` (the controller-runtime in-process API server) to
+exercise full reconciliation cycles without a real cluster. The NATConfig controller's ExternalIPPool
+change handling is covered by table-driven tests including: IP added, IP removed, full pool
+replacement, reconstruction followed by reconcile (idempotency), and NPRs with `DeletionTimestamp`
+skipped.
 
 ### Daemon
 
