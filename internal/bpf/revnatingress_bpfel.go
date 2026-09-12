@@ -32,6 +32,12 @@ type RevnatIngressNatVal struct {
 	PodPort uint16
 }
 
+type RevnatIngressTargetCidrVal struct {
+	_         structs.HostLayout
+	Addr      uint32
+	Prefixlen uint32
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.

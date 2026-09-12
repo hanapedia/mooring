@@ -67,7 +67,7 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if apierrors.IsNotFound(err) {
-		return r.createNPR(ctx, &nprr, alloc, extIPs, portRangeCount)
+		return r.createNPR(ctx, &nprr, &nc, alloc, extIPs, portRangeCount)
 	}
 
 	// NPR exists: drive portRangeCount to match NPRR.
@@ -84,6 +84,7 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 func (r *NATPortRangeRequestReconciler) createNPR(
 	ctx context.Context,
 	nprr *v1alpha1.NATPortRangeRequest,
+	nc *v1alpha1.NATConfig,
 	alloc *allocator.BlockAllocator,
 	extIPs []string,
 	portRangeCount uint16,
@@ -104,6 +105,7 @@ func (r *NATPortRangeRequestReconciler) createNPR(
 			PodIP:          nprr.Spec.PodIP,
 			NodeName:       nprr.Spec.NodeName,
 			NATConfig:      nprr.Spec.NATConfig,
+			TargetCIDRs:    nc.Spec.TargetCIDRs,
 			PortRangeCount: int32(portRangeCount),
 			Allocations:    buildPortAllocations(allocations),
 		},
