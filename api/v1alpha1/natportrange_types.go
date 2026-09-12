@@ -11,12 +11,15 @@ type PortAllocation struct {
 }
 
 type NATPortRangeSpec struct {
-	PodName      string          `json:"podName"`
-	PodNamespace string          `json:"podNamespace"`
-	PodIP        string          `json:"podIP"`
-	NodeName     string          `json:"nodeName"`
-	NATConfig    string          `json:"natConfig"`
-	Allocations  []PortAllocation `json:"allocations"`
+	PodName      string           `json:"podName"`
+	PodNamespace string           `json:"podNamespace"`
+	PodIP        string           `json:"podIP"`
+	NodeName     string           `json:"nodeName"`
+	NATConfig    string           `json:"natConfig"`
+	// PortRangeCount mirrors NATPortRangeRequest.Spec.PortRangeCount so the
+	// NATConfig controller can read it without looking up the request.
+	PortRangeCount int32          `json:"portRangeCount"`
+	Allocations    []PortAllocation `json:"allocations"`
 }
 
 // +kubebuilder:object:root=true
