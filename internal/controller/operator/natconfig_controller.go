@@ -126,10 +126,10 @@ func (r *NATConfigReconciler) reconcileNPRAllocations(
 
 	portRangeCount := uint16(npr.Spec.PortRangeCount)
 	if portRangeCount == 0 {
-		portRangeCount = 1
+		portRangeCount = defaultPortRangeCount
 	}
 
-	rollback := make(map[string][]uint16)
+	rollback := make(map[string][]allocator.Allocation)
 	for _, ip := range toAdd {
 		als, err := alloc.AllocateForIP(ip, portRangeCount, existing)
 		if err != nil {
@@ -143,7 +143,7 @@ func (r *NATConfigReconciler) reconcileNPRAllocations(
 				PortEnd:    int32(al.PortEnd),
 			})
 			existing = append(existing, al.PortStart)
-			rollback[ip] = append(rollback[ip], al.PortStart)
+			rollback[ip] = append(rollback[ip], al)
 		}
 	}
 

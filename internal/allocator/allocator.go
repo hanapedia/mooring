@@ -155,12 +155,13 @@ func (a *BlockAllocator) AllocateForPod(extIPs []string, portRangeCount uint16) 
 }
 
 // Free returns blocks to their respective IP free sets.
-// portStarts maps extIP to the PortStart values previously returned for that IP.
+// allocs maps extIP to the Allocation values previously returned for that IP.
+// Only PortStart is used to identify the block; PortEnd is ignored.
 // If an IP has been removed since allocation, its blocks are silently discarded.
 // Returning an already-free block is a no-op (idempotent against double-free).
 // Free is atomic: all portStarts are validated before any block is returned to
 // the free set, so a bad portStart does not partially free the input.
-func (a *BlockAllocator) Free(portStarts map[string][]uint16) error {
+func (a *BlockAllocator) Free(allocs map[string][]Allocation) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -170,13 +171,13 @@ func (a *BlockAllocator) Free(portStarts map[string][]uint16) error {
 		idx  uint16
 	}
 	pending := make([]entry, 0)
-	for ip, starts := range portStarts {
+	for ip, als := range allocs {
 		free, ok := a.ips[ip]
 		if !ok {
 			continue // IP removed from pool; discard
 		}
-		for _, ps := range starts {
-			idx, err := a.blockIndexOf(ps)
+		for _, al := range als {
+			idx, err := a.blockIndexOf(al.PortStart)
 			if err != nil {
 				return fmt.Errorf("IP %s: %w", ip, err)
 			}

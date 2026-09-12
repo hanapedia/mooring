@@ -8,7 +8,10 @@ import (
 	"github.com/hanapedia/mooring/internal/allocator"
 )
 
-const finalizerName = "mooring.hanapedia.link/allocation"
+const (
+	finalizerName        = "mooring.hanapedia.link/allocation"
+	defaultPortRangeCount = uint16(1)
+)
 
 // expandCIDRs expands a list of CIDR strings into individual IP address strings.
 // Duplicate IPs across CIDRs are deduplicated.
@@ -87,13 +90,3 @@ func buildPortAllocations(allocations map[string][]allocator.Allocation) []v1alp
 	return result
 }
 
-// portStartsMap converts AllocateForPod output to the format expected by BlockAllocator.Free.
-func portStartsMap(allocations map[string][]allocator.Allocation) map[string][]uint16 {
-	m := make(map[string][]uint16, len(allocations))
-	for ip, als := range allocations {
-		for _, al := range als {
-			m[ip] = append(m[ip], al.PortStart)
-		}
-	}
-	return m
-}

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
+	"github.com/hanapedia/mooring/internal/allocator"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -32,11 +33,14 @@ func (r *NATPortRangeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Free block indices back to the per-IP free sets before deletion.
 	if alloc, ok := r.Registry.Get(npr.Spec.NATConfig); ok {
-		portStarts := make(map[string][]uint16, len(npr.Spec.Allocations))
+		byIP := make(map[string][]allocator.Allocation, len(npr.Spec.Allocations))
 		for _, a := range npr.Spec.Allocations {
-			portStarts[a.ExternalIP] = append(portStarts[a.ExternalIP], uint16(a.PortStart))
+			byIP[a.ExternalIP] = append(byIP[a.ExternalIP], allocator.Allocation{
+				PortStart: uint16(a.PortStart),
+				PortEnd:   uint16(a.PortEnd),
+			})
 		}
-		if err := alloc.Free(portStarts); err != nil {
+		if err := alloc.Free(byIP); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

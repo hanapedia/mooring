@@ -168,7 +168,7 @@ func TestFreeAndReallocate(t *testing.T) {
 	}
 	portStart := allocs[ip][0].PortStart
 
-	if err := a.Free(map[string][]uint16{ip: {portStart}}); err != nil {
+	if err := a.Free(map[string][]allocator.Allocation{ip: {{PortStart: portStart, PortEnd: portStart + blockSize - 1}}}); err != nil {
 		t.Fatalf("Free: %v", err)
 	}
 
@@ -212,7 +212,7 @@ func TestDoubleFreeIdempotent(t *testing.T) {
 	}
 	portStart := allocs[ip][0].PortStart
 
-	freeArg := map[string][]uint16{ip: {portStart}}
+	freeArg := map[string][]allocator.Allocation{ip: {{PortStart: portStart, PortEnd: portStart + blockSize - 1}}}
 	if err := a.Free(freeArg); err != nil {
 		t.Fatalf("first Free: %v", err)
 	}

@@ -55,7 +55,7 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 		alloc.EnsureIP(ip)
 	}
 
-	portRangeCount := uint16(1)
+	portRangeCount := defaultPortRangeCount
 	if nprr.Spec.PortRangeCount != nil {
 		portRangeCount = uint16(*nprr.Spec.PortRangeCount)
 	}
@@ -109,15 +109,15 @@ func (r *NATPortRangeRequestReconciler) createNPR(
 		},
 	}
 	if err := controllerutil.SetControllerReference(nprr, &npr, r.Scheme); err != nil {
-		_ = alloc.Free(portStartsMap(allocations))
+		_ = alloc.Free(allocations)
 		return ctrl.Result{}, err
 	}
 	if err := r.Create(ctx, &npr); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			_ = alloc.Free(portStartsMap(allocations))
+			_ = alloc.Free(allocations)
 			return ctrl.Result{}, nil
 		}
-		_ = alloc.Free(portStartsMap(allocations))
+		_ = alloc.Free(allocations)
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -131,7 +131,7 @@ func (r *NATPortRangeRequestReconciler) increaseCount(
 	delta uint16,
 ) (ctrl.Result, error) {
 	existing := collectPortStarts(npr.Spec.Allocations)
-	rollback := make(map[string][]uint16)
+	rollback := make(map[string][]allocator.Allocation)
 	var newAllocs []v1alpha1.PortAllocation
 
 	for _, ip := range extIPs {
@@ -147,7 +147,7 @@ func (r *NATPortRangeRequestReconciler) increaseCount(
 				PortEnd:    int32(al.PortEnd),
 			})
 			existing = append(existing, al.PortStart)
-			rollback[ip] = append(rollback[ip], al.PortStart)
+			rollback[ip] = append(rollback[ip], al)
 		}
 	}
 
@@ -168,7 +168,7 @@ func (r *NATPortRangeRequestReconciler) decreaseCount(
 	desired uint16,
 ) (ctrl.Result, error) {
 	byIP := groupAllocsByIP(npr.Spec.Allocations)
-	toFree := make(map[string][]uint16)
+	toFree := make(map[string][]allocator.Allocation)
 	var newAllocs []v1alpha1.PortAllocation
 
 	// Only iterate current pool IPs. Allocations for IPs not in extIPs (removed
@@ -180,7 +180,10 @@ func (r *NATPortRangeRequestReconciler) decreaseCount(
 		sort.Slice(als, func(i, j int) bool { return als[i].PortStart < als[j].PortStart })
 		if uint16(len(als)) > desired {
 			for _, a := range als[desired:] {
-				toFree[ip] = append(toFree[ip], uint16(a.PortStart))
+				toFree[ip] = append(toFree[ip], allocator.Allocation{
+					PortStart: uint16(a.PortStart),
+					PortEnd:   uint16(a.PortEnd),
+				})
 			}
 			als = als[:desired]
 		}
