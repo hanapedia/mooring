@@ -109,6 +109,17 @@ func Load(iface string) error {
 	return nil
 }
 
+// EnsureLoaded loads BPF programs if they are not already pinned.
+// If the snat_egress TCX link already exists from a prior run, the load step
+// is skipped — existing programs keep running and in-flight connections are
+// unaffected.
+func EnsureLoaded(iface string) error {
+	if _, err := os.Stat(filepath.Join(linksDir, "snat_egress")); err == nil {
+		return nil
+	}
+	return Load(iface)
+}
+
 // Unload detaches the TC programs from the uplink and removes all bpffs pins.
 func Unload() error {
 	for _, name := range []string{"snat_egress", "revnat_ingress"} {

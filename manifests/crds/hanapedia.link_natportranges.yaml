@@ -67,6 +67,10 @@ spec:
               portRangeCount:
                 format: int32
                 type: integer
+              targetCIDRs:
+                items:
+                  type: string
+                type: array
             required:
             - allocations
             - natConfig
@@ -75,6 +79,7 @@ spec:
             - podName
             - podNamespace
             - portRangeCount
+            - targetCIDRs
             type: object
         type: object
     served: true

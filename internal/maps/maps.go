@@ -27,17 +27,27 @@ func openMap(name string) (*ebpf.Map, error) {
 	return m, nil
 }
 
-// UpsertSnatEntry adds or updates the snat_config allocation for (podIP, extIP).
-// If an entry for extIP already exists it is overwritten with the new range and
-// its next_port counter reset to zero; otherwise a new entry is appended.
-func UpsertSnatEntry(podIP, extIP net.IP, portStart, portEnd uint16) error {
+// UpsertSnatEntry adds or updates the snat_config allocation for
+// (podIP, targetCIDR, extIP). If an entry for extIP already exists within the
+// (podIP, targetCIDR) bucket it is overwritten with the new range and its
+// next_port counter reset to zero; otherwise a new entry is appended.
+func UpsertSnatEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
 	m, err := openMap("snat_config")
 	if err != nil {
 		return err
 	}
 	defer m.Close()
 
-	key := ipToUint32(podIP)
+	ones, _ := targetCIDR.Mask.Size()
+	cidrIP4 := targetCIDR.IP.To4()
+	if cidrIP4 == nil {
+		return fmt.Errorf("only IPv4 target CIDRs are supported")
+	}
+	key := mooringbpf.SnatEgressSnatConfigKey{
+		PodIp:         ipToUint32(podIP.To4()),
+		CidrAddr:      ipToUint32(cidrIP4),
+		CidrPrefixlen: uint32(ones),
+	}
 	extIPVal := ipToUint32(extIP)
 
 	var val mooringbpf.SnatEgressSnatConfigVal
@@ -91,7 +101,10 @@ func AddTargetCIDR(cidr *net.IPNet) error {
 		Prefixlen: uint32(ones),
 		Addr:      ipToUint32(ip4),
 	}
-	var val uint8 = 1
+	val := mooringbpf.SnatEgressTargetCidrVal{
+		Addr:      ipToUint32(ip4),
+		Prefixlen: uint32(ones),
+	}
 	return m.Put(key, val)
 }
 
@@ -190,6 +203,114 @@ func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) e
 		if err := outer.Put(extIPKey, uint32(inner.FD())); err != nil {
 			return fmt.Errorf("insert inner map for %v: %w", extIP, err)
 		}
+	}
+	return nil
+}
+
+// RemoveSnatAllocs removes the snat_config allocations for the given extIPs
+// from the (podIP, targetCIDR) entry. Slots for ext-IPs not in the list are
+// left intact. If all allocations are removed, the entry is deleted entirely.
+func RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
+	m, err := openMap("snat_config")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	ones, _ := targetCIDR.Mask.Size()
+	cidrIP4 := targetCIDR.IP.To4()
+	if cidrIP4 == nil {
+		return fmt.Errorf("only IPv4 target CIDRs are supported")
+	}
+	key := mooringbpf.SnatEgressSnatConfigKey{
+		PodIp:         ipToUint32(podIP.To4()),
+		CidrAddr:      ipToUint32(cidrIP4),
+		CidrPrefixlen: uint32(ones),
+	}
+
+	var val mooringbpf.SnatEgressSnatConfigVal
+	if err := m.Lookup(key, &val); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return nil
+		}
+		return fmt.Errorf("lookup snat_config for %s/%s: %w", podIP, targetCIDR, err)
+	}
+
+	toRemove := make(map[uint32]struct{}, len(extIPs))
+	for _, ip := range extIPs {
+		toRemove[ipToUint32(ip)] = struct{}{}
+	}
+
+	newCount := uint32(0)
+	for i := uint32(0); i < val.Count; i++ {
+		if _, ok := toRemove[val.Allocations[i].ExtIp]; ok {
+			continue
+		}
+		val.Allocations[newCount] = val.Allocations[i]
+		newCount++
+	}
+	if newCount == val.Count {
+		return nil
+	}
+	for i := newCount; i < val.Count; i++ {
+		val.Allocations[i].ExtIp = 0
+		val.Allocations[i].PortStart = 0
+		val.Allocations[i].PortEnd = 0
+		val.Allocations[i].NextPort = 0
+	}
+	val.Count = newCount
+
+	if newCount == 0 {
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete snat_config for %s/%s: %w", podIP, targetCIDR, err)
+		}
+		return nil
+	}
+	return m.Put(key, val)
+}
+
+// RemoveTargetCIDR deletes a destination CIDR from the target_cidrs LPM map.
+func RemoveTargetCIDR(cidr *net.IPNet) error {
+	ip4 := cidr.IP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("only IPv4 CIDRs are supported")
+	}
+	m, err := openMap("target_cidrs")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	ones, _ := cidr.Mask.Size()
+	key := mooringbpf.SnatEgressLpmKey{
+		Prefixlen: uint32(ones),
+		Addr:      ipToUint32(ip4),
+	}
+	if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("remove target CIDR %s: %w", cidr, err)
+	}
+	return nil
+}
+
+// RemoveExtIP deletes an external IP CIDR from the ext_ip_pool LPM map.
+func RemoveExtIP(cidr *net.IPNet) error {
+	ip4 := cidr.IP.To4()
+	if ip4 == nil {
+		return fmt.Errorf("only IPv4 CIDRs are supported")
+	}
+	m, err := openMap("ext_ip_pool")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	ones, _ := cidr.Mask.Size()
+	key := mooringbpf.RevnatIngressLpmKey{
+		Prefixlen: uint32(ones),
+		Addr:      ipToUint32(ip4),
+	}
+	if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("remove ext IP %s: %w", cidr, err)
 	}
 	return nil
 }

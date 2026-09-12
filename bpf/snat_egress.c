@@ -37,11 +37,20 @@ struct session_val {
   __be16 nat_port;
 };
 
+// Key for snat_config: pod_ip combined with the matched target CIDR so that a
+// pod matching multiple NATConfigs gets independent snat_config entries — one
+// per target CIDR — each with its own ext-IP pool and port counters.
+struct snat_config_key {
+  __be32 pod_ip;
+  __be32 cidr_addr;
+  __u32 cidr_prefixlen;
+};
+
 /// Map defs
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1024);
-  __type(key, __be32);
+  __uint(max_entries, 65536);
+  __type(key, struct snat_config_key);
   __type(value, struct snat_config_val);
 } snat_config SEC(".maps");
 
@@ -76,15 +85,17 @@ int snat_egress(struct __sk_buff *skb) {
       iph->protocol != IPPROTO_ICMP)
     return TC_ACT_OK;
 
-  // look up dest against target cidrs
+  // look up dest against target cidrs; value carries the matched CIDR identity
   struct lpm_key lpm = {
       .prefixlen = 32, /* match dest IP exactly */
       .addr = iph->daddr,
   };
-  if (!bpf_map_lookup_elem(&target_cidrs, &lpm))
+  struct target_cidr_val *tcv = bpf_map_lookup_elem(&target_cidrs, &lpm);
+  if (!tcv)
     return TC_ACT_OK;
 
-  // look up snat config for this pod
+  // look up snat config keyed by (pod_ip, matched_target_cidr) so that a pod
+  // matched by multiple NATConfigs uses the correct ext-IP pool per destination
   __be32 pod_ip = iph->saddr;
   // parse l4 header
   __be16 pod_port, server_port;
@@ -134,7 +145,12 @@ int snat_egress(struct __sk_buff *skb) {
     ext_ip = sv->ext_ip;
     nat_port = sv->nat_port;
   } else {
-    struct snat_config_val *cv = bpf_map_lookup_elem(&snat_config, &pod_ip);
+    struct snat_config_key sc_key = {
+        .pod_ip = pod_ip,
+        .cidr_addr = tcv->addr,
+        .cidr_prefixlen = tcv->prefixlen,
+    };
+    struct snat_config_val *cv = bpf_map_lookup_elem(&snat_config, &sc_key);
     if (!cv || cv->count == 0) // no snat config found
       return TC_ACT_OK;
 
