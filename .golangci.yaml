@@ -13,3 +13,15 @@ linters:
     - misspell
     - staticcheck
     - unused
+
+  exclusions:
+    rules:
+      # Close errors in defers are never actionable.
+      - linters: [errcheck]
+        text: "Error return value of `.+\\.Close` is not checked"
+
+      # scheme.Builder is deprecated for philosophical reasons; kubebuilder still
+      # generates this pattern and restructuring the API package is not worth it.
+      - linters: [staticcheck]
+        path: "api/v1alpha1/groupversion_info.go"
+        text: "SA1019"
