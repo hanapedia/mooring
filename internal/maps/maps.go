@@ -156,11 +156,13 @@ func portRangeMapName(proto uint8) (string, error) {
 // openOrCreateInnerMap returns the inner array map for extIPKey from the outer
 // HASH_OF_MAPS, creating a new one if absent. created=true means the caller
 // must insert the returned map into the outer map before closing it.
+//
+// HASH_OF_MAPS lookup returns the inner map's ID (not an fd); passing **Map
+// lets cilium/ebpf call NewMapFromID internally via unmarshalMap.
 func openOrCreateInnerMap(outer *ebpf.Map, extIPKey uint32) (inner *ebpf.Map, created bool, err error) {
-	var innerFD uint32
-	if err = outer.Lookup(extIPKey, &innerFD); err == nil {
-		inner, err = ebpf.NewMapFromFD(int(innerFD))
-		return inner, false, err
+	err = outer.Lookup(extIPKey, &inner)
+	if err == nil {
+		return inner, false, nil
 	}
 	if !errors.Is(err, ebpf.ErrKeyNotExist) {
 		return nil, false, fmt.Errorf("lookup inner map: %w", err)
@@ -200,7 +202,7 @@ func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) e
 	}
 
 	if created {
-		if err := outer.Put(extIPKey, uint32(inner.FD())); err != nil {
+		if err := outer.Put(extIPKey, inner); err != nil {
 			return fmt.Errorf("insert inner map for %v: %w", extIP, err)
 		}
 	}
@@ -330,16 +332,12 @@ func RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8
 
 	extIPKey := ipToUint32(extIP)
 
-	var innerFD uint32
-	if err := outer.Lookup(extIPKey, &innerFD); err != nil {
+	var inner *ebpf.Map
+	if err := outer.Lookup(extIPKey, &inner); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil
 		}
 		return fmt.Errorf("lookup inner map: %w", err)
-	}
-	inner, err := ebpf.NewMapFromFD(int(innerFD))
-	if err != nil {
-		return fmt.Errorf("open inner map: %w", err)
 	}
 	defer inner.Close()
 

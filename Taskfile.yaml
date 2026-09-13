@@ -57,6 +57,26 @@ tasks:
     cmds:
       - docker build -t {{.IMAGE}} .
 
+  docker-build-operator:
+    desc: Build the operator container image
+    vars:
+      IMAGE: '{{.IMAGE | default "ghcr.io/hanapedia/mooring-operator:dev"}}'
+    cmds:
+      - docker build -t {{.IMAGE}} -f images/operator/Dockerfile .
+
+  docker-build-agent:
+    desc: Build the agent (daemon) container image
+    vars:
+      IMAGE: '{{.IMAGE | default "ghcr.io/hanapedia/mooring-agent:dev"}}'
+    cmds:
+      - docker build -t {{.IMAGE}} -f images/agent/Dockerfile .
+
+  docker-build-all:
+    desc: Build both operator and agent container images
+    cmds:
+      - task: docker-build-operator
+      - task: docker-build-agent
+
   all:
     desc: Full build (setup → generate → build)
     cmds:

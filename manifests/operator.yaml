@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mooring-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mooring-operator
+  namespace: mooring-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mooring-operator
+rules:
+- apiGroups: ["hanapedia.link"]
+  resources: ["natconfigs"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["hanapedia.link"]
+  resources: ["natportrangerequests"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["hanapedia.link"]
+  resources: ["natportranges"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mooring-operator
+subjects:
+- kind: ServiceAccount
+  name: mooring-operator
+  namespace: mooring-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mooring-operator
+---
+# Scoped to mooring-system for leader election leases only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mooring-operator-leader-election
+  namespace: mooring-system
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mooring-operator-leader-election
+  namespace: mooring-system
+subjects:
+- kind: ServiceAccount
+  name: mooring-operator
+  namespace: mooring-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mooring-operator-leader-election
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mooring-operator
+  namespace: mooring-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mooring-operator
+  template:
+    metadata:
+      labels:
+        app: mooring-operator
+    spec:
+      serviceAccountName: mooring-operator
+      containers:
+      - name: operator
+        image: ghcr.io/hanapedia/mooring-operator:dev
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
+      terminationGracePeriodSeconds: 10

@@ -15,7 +15,7 @@ struct snat_entry {
   __u32 next_port; /* atomic counter for port allocation */
 };
 
-#define MAX_SNAT_ALLOCS 16
+#define MAX_SNAT_ALLOCS 256
 
 struct snat_config_val {
   struct snat_entry allocations[MAX_SNAT_ALLOCS];
@@ -49,7 +49,8 @@ struct snat_config_key {
 /// Map defs
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 65536);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __uint(max_entries, 4096);
   __type(key, struct snat_config_key);
   __type(value, struct snat_config_val);
 } snat_config SEC(".maps");
