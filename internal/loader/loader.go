@@ -60,16 +60,16 @@ func Load(iface string) error {
 
 	// Pin maps. Shared maps (nat_table_*, target_cidrs) are pinned from snatObjs.
 	for name, m := range map[string]*ebpf.Map{
-		"snat_config":              snatObjs.SnatConfig,
-		"nat_table_tcp":            snatObjs.NatTableTcp,
-		"nat_table_udp":            snatObjs.NatTableUdp,
-		"nat_table_icmp":           snatObjs.NatTableIcmp,
-		"outbound_sessions":        snatObjs.OutboundSessions,
-		"target_cidrs":             snatObjs.TargetCidrs,
-		"ext_ip_pool":              revnatObjs.ExtIpPool,
-		"port_range_lookup_tcp":    revnatObjs.PortRangeLookupTcp,
-		"port_range_lookup_udp":    revnatObjs.PortRangeLookupUdp,
-		"port_range_lookup_icmp":   revnatObjs.PortRangeLookupIcmp,
+		"snat_config":            snatObjs.SnatConfig,
+		"nat_table_tcp":          snatObjs.NatTableTcp,
+		"nat_table_udp":          snatObjs.NatTableUdp,
+		"nat_table_icmp":         snatObjs.NatTableIcmp,
+		"outbound_sessions":      snatObjs.OutboundSessions,
+		"target_cidrs":           snatObjs.TargetCidrs,
+		"ext_ip_pool":            revnatObjs.ExtIpPool,
+		"port_range_lookup_tcp":  revnatObjs.PortRangeLookupTcp,
+		"port_range_lookup_udp":  revnatObjs.PortRangeLookupUdp,
+		"port_range_lookup_icmp": revnatObjs.PortRangeLookupIcmp,
 	} {
 		if err := m.Pin(filepath.Join(mapsDir, name)); err != nil {
 			return fmt.Errorf("pin map %s: %w", name, err)

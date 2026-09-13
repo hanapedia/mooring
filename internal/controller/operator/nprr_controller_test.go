@@ -234,4 +234,3 @@ var _ = Describe("NATPortRangeRequest controller", func() {
 		})
 	})
 })
-

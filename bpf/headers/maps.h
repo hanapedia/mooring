@@ -44,7 +44,8 @@ struct {
 // Value stored in target_cidrs: the canonical network address and prefix length
 // of the matched CIDR. Stored redundantly so the egress program can retrieve
 // the matching CIDR identity from the value (BPF LPM lookup returns the value
-// of the matching entry, not the key) and use it as part of the snat_config key.
+// of the matching entry, not the key) and use it as part of the snat_config
+// key.
 struct target_cidr_val {
   __be32 addr;
   __u32 prefixlen;
