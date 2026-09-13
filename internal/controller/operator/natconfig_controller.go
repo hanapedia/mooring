@@ -71,7 +71,7 @@ func (r *NATConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	for i := range nprList.Items {
 		npr := &nprList.Items[i]
-		if !npr.DeletionTimestamp.IsZero() {
+		if !npr.DeletionTimestamp.IsZero() || npr.Spec.StaleSince != nil {
 			continue
 		}
 		if err := r.reconcileNPRAllocations(ctx, npr, desiredIPs, desiredSet, alloc); err != nil {

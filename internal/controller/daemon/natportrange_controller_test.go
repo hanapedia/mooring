@@ -1,22 +1,16 @@
 package daemon_test
 
 import (
-	"slices"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
-	"github.com/hanapedia/mooring/internal/controller/daemon"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const testFinalizer = "test/keep"
-
 // testTargetCIDR is the target CIDR embedded in all NPRs created by makeNPR.
-// Tests that check snat_config calls (UpsertSnatEntry, RemoveSnatAllocs) can
-// assert against this value.
+// Tests that check snat_config calls can assert against this value.
 const testTargetCIDR = "10.99.0.0/24"
 
 func makeNPR(name, nodeName, podIP, extIP string, portStart, portEnd int32) *v1alpha1.NATPortRange {
@@ -37,23 +31,15 @@ func makeNPR(name, nodeName, podIP, extIP string, portStart, portEnd int32) *v1a
 	}
 }
 
-// hasBPFFinalizer returns true if cur carries the daemon BPF finalizer.
-func hasBPFFinalizer(name string) bool {
-	var cur v1alpha1.NATPortRange
-	if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, &cur); err != nil {
-		return false
-	}
-	return slices.Contains(cur.Finalizers, daemon.NPRBPFFinalizer)
-}
-
-// removeFinalizers clears all finalizers so the NPR can be GC'd by envtest.
-func removeFinalizers(name string) {
+// markStale sets StaleSince on the named NPR.
+func markStale(name string) {
 	Eventually(func() error {
 		var cur v1alpha1.NATPortRange
 		if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, &cur); err != nil {
 			return err
 		}
-		cur.Finalizers = nil
+		now := metav1.Now()
+		cur.Spec.StaleSince = &now
 		return k8sClient.Update(ctx, &cur)
 	}, "5s", "100ms").Should(Succeed())
 }
@@ -105,52 +91,21 @@ var _ = Describe("NATPortRange sync controller", func() {
 		})
 	})
 
-	Describe("BPF finalizer", func() {
-		It("adds the bpf-sync finalizer after first sync", func() {
-			npr := makeNPR(uniqueName("npr"), testNodeName, "10.244.4.50", "203.0.115.10", 1900, 1999)
-			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
-
-			eventually(func() bool { return hasBPFFinalizer(npr.Name) })
-		})
-
-		It("removes the bpf-sync finalizer after BPF cleanup on deletion", func() {
-			extIP := "203.0.115.11"
-			podIP := "10.244.4.51"
-
-			// testFinalizer keeps the NPR alive so we can observe intermediate state.
-			npr := makeNPR(uniqueName("npr"), testNodeName, podIP, extIP, 2000, 2099)
-			npr.Finalizers = []string{testFinalizer}
-			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
-
-			eventually(func() bool { return hasBPFFinalizer(npr.Name) })
-
-			Expect(k8sClient.Delete(ctx, npr)).To(Succeed())
-
-			// syncDeleted must remove the daemon finalizer (testFinalizer still holds the NPR).
-			eventually(func() bool { return !hasBPFFinalizer(npr.Name) })
-
-			removeFinalizers(npr.Name)
-		})
-	})
-
-	Describe("RemovePortRange on NPR deletion", func() {
-		It("calls RemovePortRange and RemoveSnatAllocs when a local-node NPR is deleted", func() {
+	Describe("BPF cleanup on NPR stale", func() {
+		It("cleans up port_range_lookup and snat_config when StaleSince is set on a local-node NPR", func() {
 			extIP := "203.0.115.4"
 			podIP := "10.244.4.20"
 			var portStart, portEnd uint16 = 1300, 1399
 
-			// testFinalizer keeps the NPR alive so we can observe the terminating state.
 			npr := makeNPR(uniqueName("npr"), testNodeName, podIP, extIP, int32(portStart), int32(portEnd))
-			npr.Finalizers = []string{testFinalizer}
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
-			// Wait for initial sync (AddPortRange).
+			// Wait for initial sync.
 			eventually(func() bool {
 				return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, 6)
 			})
 
-			// Delete → DeletionTimestamp set; testFinalizer keeps the NPR alive.
-			Expect(k8sClient.Delete(ctx, npr)).To(Succeed())
+			markStale(npr.Name)
 
 			for _, proto := range []uint8{6, 17, 1} {
 				proto := proto
@@ -161,24 +116,21 @@ var _ = Describe("NATPortRange sync controller", func() {
 			eventually(func() bool {
 				return mockSnatConfig.hasRemoved(podIP)
 			})
-
-			removeFinalizers(npr.Name)
 		})
 
-		It("calls RemovePortRange but not RemoveSnatAllocs for a remote-node NPR deletion", func() {
+		It("cleans up port_range_lookup but not snat_config for a remote-node NPR", func() {
 			extIP := "203.0.115.5"
 			podIP := "10.244.4.21"
 			var portStart, portEnd uint16 = 1400, 1499
 
 			npr := makeNPR(uniqueName("npr"), "other-node", podIP, extIP, int32(portStart), int32(portEnd))
-			npr.Finalizers = []string{testFinalizer}
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool {
 				return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, 6)
 			})
 
-			Expect(k8sClient.Delete(ctx, npr)).To(Succeed())
+			markStale(npr.Name)
 
 			for _, proto := range []uint8{6, 17, 1} {
 				proto := proto
@@ -189,8 +141,6 @@ var _ = Describe("NATPortRange sync controller", func() {
 			consistently(func() bool {
 				return !mockSnatConfig.hasRemoved(podIP)
 			})
-
-			removeFinalizers(npr.Name)
 		})
 	})
 

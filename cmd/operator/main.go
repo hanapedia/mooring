@@ -49,7 +49,6 @@ func main() {
 
 	if err := (&operator.NATPortRangeRequestReconciler{
 		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
 		Registry: registry,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATPortRangeRequest controller")
