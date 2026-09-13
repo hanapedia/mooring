@@ -5,6 +5,7 @@ includes:
   e2e:
     taskfile: ./e2e/Taskfile.yaml
     dir: ./e2e
+    optional: true
 
 tasks:
   gen-vmlinux:
@@ -17,10 +18,14 @@ tasks:
     vars:
       LIBBPF_BPF_DIR:
         sh: |
+          [ -n "${LIBBPF_BPF_DIR:-}" ] && echo "$LIBBPF_BPF_DIR" && exit 0
           for dir in /usr/include/bpf /usr/local/include/bpf; do
             [ -f "$dir/bpf_helpers.h" ] && echo "$dir" && exit 0
           done
-          find /nix/store -maxdepth 4 -name "bpf_helpers.h" 2>/dev/null \
+          if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libbpf 2>/dev/null; then
+            echo "$(pkg-config --variable=includedir libbpf)/bpf" && exit 0
+          fi
+          find /nix/store -maxdepth 6 -name "bpf_helpers.h" 2>/dev/null \
             | grep libbpf | sort | tail -1 | sed 's|/bpf_helpers.h||'
     cmds:
       - mkdir -p .dev-headers/bpf
@@ -61,7 +66,7 @@ tasks:
       ENVTEST_ASSETS:
         sh: setup-envtest use -p path
     cmds:
-      - KUBEBUILDER_ASSETS={{.ENVTEST_ASSETS}} go test -mod=vendor ./internal/controller/...
+      - KUBEBUILDER_ASSETS={{.ENVTEST_ASSETS}} go test ./internal/controller/...
 
   generate:
     desc: Generate Go BPF bindings from C sources (requires clang and task setup)

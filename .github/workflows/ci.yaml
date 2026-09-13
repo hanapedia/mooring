@@ -8,12 +8,20 @@ on:
 
 jobs:
   test:
-    name: Controller tests
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - uses: ./.github/actions/setup-nix
+
+      - name: Check formatting
+        run: |
+          nix develop --command task fmt
+          git diff --exit-code
+
+      - name: Run linter
+        run: nix develop --command task lint
 
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
@@ -29,11 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: ./.github/actions/setup-nix
+      - name: Build operator image
+        run: docker build -f images/operator/Dockerfile -t mooring-operator:ci .
 
-      - name: Build operator and agent
-        run: |
-          nix develop --command sh -c '
-            CGO_ENABLED=0 go build -mod=vendor -o /dev/null ./cmd/operator &&
-            CGO_ENABLED=0 go build -mod=vendor -o /dev/null ./cmd/daemon
-          '
+      - name: Build agent image
+        run: docker build -f images/agent/Dockerfile -t mooring-agent:ci .

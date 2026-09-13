@@ -12,11 +12,15 @@
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
           default = pkgs.mkShell {
+            LIBBPF_BPF_DIR = "${pkgs.libbpf}/include/bpf";
+
             nativeBuildInputs = with pkgs; [
               # BPF toolchain
               llvmPackages.clang-unwrapped
+              llvmPackages.llvm
               bpftools
               libbpf
+              pkg-config
 
               # Go
               go
