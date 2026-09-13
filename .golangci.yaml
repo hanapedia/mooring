@@ -25,3 +25,9 @@ linters:
       - linters: [staticcheck]
         path: "api/v1alpha1/groupversion_info.go"
         text: "SA1019"
+
+      # BPF object files are not committed; suppress the embed failure on the
+      # bpf2go-generated files so lint passes without the BPF toolchain.
+      - linters: [typecheck]
+        path: "internal/bpf/"
+        text: "no matching files found"
