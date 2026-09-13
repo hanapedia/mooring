@@ -19,8 +19,8 @@ var _ = Describe("NATConfig controller", func() {
 				metav1.LabelSelector{})
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
-			eventually(func() bool { return mockLPM.hasAddedTarget(targetCIDR) })
-			eventually(func() bool { return mockLPM.hasAddedExtIP(extCIDR) })
+			eventually(func() bool { return mockTargetCIDR.hasAdded(targetCIDR) })
+			eventually(func() bool { return mockExtIPPool.hasAdded(extCIDR) })
 		})
 
 		It("removes target CIDRs and ext IPs from BPF on NATConfig deletion", func() {
@@ -30,12 +30,12 @@ var _ = Describe("NATConfig controller", func() {
 				metav1.LabelSelector{})
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
-			eventually(func() bool { return mockLPM.hasAddedTarget(targetCIDR) })
+			eventually(func() bool { return mockTargetCIDR.hasAdded(targetCIDR) })
 
 			Expect(k8sClient.Delete(ctx, nc)).To(Succeed())
 
-			eventually(func() bool { return mockLPM.hasRemovedTarget(targetCIDR) })
-			eventually(func() bool { return mockLPM.hasRemovedExtIP(extCIDR) })
+			eventually(func() bool { return mockTargetCIDR.hasRemoved(targetCIDR) })
+			eventually(func() bool { return mockExtIPPool.hasRemoved(extCIDR) })
 		})
 
 		It("does not remove a CIDR from BPF while another NATConfig still references it", func() {
@@ -51,60 +51,22 @@ var _ = Describe("NATConfig controller", func() {
 			Expect(k8sClient.Create(ctx, nc1)).To(Succeed())
 			Expect(k8sClient.Create(ctx, nc2)).To(Succeed())
 
-			eventually(func() bool { return mockLPM.hasAddedTarget(sharedTarget) })
+			eventually(func() bool { return mockTargetCIDR.hasAdded(sharedTarget) })
 
 			// Delete nc1; wait for its sentinel CIDR to be removed (proves reconcile ran).
 			Expect(k8sClient.Delete(ctx, nc1)).To(Succeed())
-			eventually(func() bool { return mockLPM.hasRemovedTarget(sentinelTarget) })
+			eventually(func() bool { return mockTargetCIDR.hasRemoved(sentinelTarget) })
 
 			// sharedTarget must NOT have been removed because nc2 still owns it.
-			Expect(mockLPM.hasRemovedTarget(sharedTarget)).To(BeFalse())
+			Expect(mockTargetCIDR.hasRemoved(sharedTarget)).To(BeFalse())
 
 			// Now delete nc2; shared CIDR should be removed.
 			Expect(k8sClient.Delete(ctx, nc2)).To(Succeed())
-			eventually(func() bool { return mockLPM.hasRemovedTarget(sharedTarget) })
+			eventually(func() bool { return mockTargetCIDR.hasRemoved(sharedTarget) })
 		})
 	})
 
-	Describe("NPRR lifecycle", func() {
-		It("creates NPRRs for matching local pods when NATConfig appears", func() {
-			// Create pod first, then NATConfig.
-			podName := uniqueName("pod")
-			pod := makePod(podName, "default", map[string]string{"env": podName})
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-			setPodIP(pod, "10.244.3.10")
-
-			ncName := uniqueName("nc")
-			nc := makeNATConfig(ncName, []string{"10.24.0.0/24"}, []string{"203.0.114.16/30"},
-				metav1.LabelSelector{MatchLabels: map[string]string{"env": podName}})
-			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
-
-			nprrN := "default-" + podName + "-" + ncName
-			eventually(func() bool { return nprrExists(nprrN) })
-		})
-
-		It("sets DeletionGracePeriodExpiry on NPRRs when NATConfig is deleted", func() {
-			ncName := uniqueName("nc")
-			nc := makeNATConfig(ncName, []string{"10.25.0.0/24"}, []string{"203.0.114.20/30"},
-				metav1.LabelSelector{MatchLabels: map[string]string{"role": ncName}})
-			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
-
-			podName := uniqueName("pod")
-			pod := makePod(podName, "default", map[string]string{"role": ncName})
-			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-			setPodIP(pod, "10.244.3.20")
-
-			nprrN := "default-" + podName + "-" + ncName
-			eventually(func() bool { return nprrExists(nprrN) })
-
-			Expect(k8sClient.Delete(ctx, nc)).To(Succeed())
-
-			eventually(func() bool {
-				nprr := getNPRR(nprrN)
-				return nprr != nil && nprr.Status.DeletionGracePeriodExpiry != nil
-			})
-		})
-
+	Describe("BPF update on spec change", func() {
 		It("updates CIDRs in BPF when NATConfig externalIPPool changes", func() {
 			oldExtCIDR := "203.0.114.24/30"
 			newExtCIDR := "203.0.114.28/30"
@@ -112,7 +74,7 @@ var _ = Describe("NATConfig controller", func() {
 				metav1.LabelSelector{})
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
-			eventually(func() bool { return mockLPM.hasAddedExtIP(oldExtCIDR) })
+			eventually(func() bool { return mockExtIPPool.hasAdded(oldExtCIDR) })
 
 			Eventually(func() error {
 				var current v1alpha1.NATConfig
@@ -123,8 +85,8 @@ var _ = Describe("NATConfig controller", func() {
 				return k8sClient.Update(ctx, &current)
 			}, "5s", "100ms").Should(Succeed())
 
-			eventually(func() bool { return mockLPM.hasAddedExtIP(newExtCIDR) })
-			eventually(func() bool { return mockLPM.hasRemovedExtIP(oldExtCIDR) })
+			eventually(func() bool { return mockExtIPPool.hasAdded(newExtCIDR) })
+			eventually(func() bool { return mockExtIPPool.hasRemoved(oldExtCIDR) })
 		})
 	})
 })

@@ -10,7 +10,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// NPRBPFFinalizer is added to every NATPortRange by the daemon after it first
+// writes BPF maps. It prevents the NPR from disappearing from the API server
+// before the daemon has had a chance to clean up those BPF entries, even across
+// daemon restarts.
+const NPRBPFFinalizer = "mooring.hanapedia.link/bpf-sync"
 
 // syncProtos lists the IP protocols for which port_range_lookup maps are maintained.
 var syncProtos = []uint8{6, 17, 1} // TCP, UDP, ICMP
@@ -24,25 +31,31 @@ type syncedNPR struct {
 
 type NATPortRangeSyncReconciler struct {
 	client.Client
-	NodeName string
-	BPF      PortRangeBPF
-	mu       sync.Mutex
-	synced   map[string]syncedNPR // key: NPR name
+	NodeName        string
+	PortRangeLookup PortRangeLookupMap
+	SnatConfig      SnatConfigMap
+	mu              sync.Mutex
+	synced          map[string]syncedNPR // key: NPR name
 }
 
-func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, bpf PortRangeBPF) *NATPortRangeSyncReconciler {
+func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, snatConfig SnatConfigMap) *NATPortRangeSyncReconciler {
 	return &NATPortRangeSyncReconciler{
-		Client: c,
-		NodeName: nodeName,
-		BPF:    bpf,
-		synced: make(map[string]syncedNPR),
+		Client:          c,
+		NodeName:        nodeName,
+		PortRangeLookup: portRangeLookup,
+		SnatConfig:      snatConfig,
+		synced:          make(map[string]syncedNPR),
 	}
 }
 
+// Reconcile syncs the snat_config map for local pods and the per-protocol
+// port_range_lookup maps against NATPortRange resources.
 func (r *NATPortRangeSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var npr v1alpha1.NATPortRange
 	if err := r.Get(ctx, req.NamespacedName, &npr); err != nil {
 		if apierrors.IsNotFound(err) {
+			// NPRBPFFinalizer prevents deletion until BPF cleanup runs, so
+			// IsNotFound here means this daemon never synced the NPR.
 			r.mu.Lock()
 			delete(r.synced, req.Name)
 			r.mu.Unlock()
@@ -52,18 +65,18 @@ func (r *NATPortRangeSyncReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if !npr.DeletionTimestamp.IsZero() {
-		return r.syncDeleted(&npr)
+		return r.syncDeleted(ctx, &npr)
 	}
-	return r.syncAlive(&npr)
+	return r.syncAlive(ctx, &npr)
 }
 
-func (r *NATPortRangeSyncReconciler) syncDeleted(npr *v1alpha1.NATPortRange) (ctrl.Result, error) {
+func (r *NATPortRangeSyncReconciler) syncDeleted(ctx context.Context, npr *v1alpha1.NATPortRange) (ctrl.Result, error) {
 	podIP := net.ParseIP(npr.Spec.PodIP)
 
 	for _, a := range npr.Spec.Allocations {
 		extIP := net.ParseIP(a.ExternalIP)
 		for _, proto := range syncProtos {
-			if err := r.BPF.RemovePortRange(extIP, podIP, uint16(a.PortStart), uint16(a.PortEnd), proto); err != nil {
+			if err := r.PortRangeLookup.Remove(extIP, podIP, uint16(a.PortStart), uint16(a.PortEnd), proto); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove port range: %w", err)
 			}
 		}
@@ -76,9 +89,16 @@ func (r *NATPortRangeSyncReconciler) syncDeleted(npr *v1alpha1.NATPortRange) (ct
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 			}
-			if err := r.BPF.RemoveSnatAllocs(podIP, cidr, extIPs); err != nil {
+			if err := r.SnatConfig.RemoveAllocs(podIP, cidr, extIPs); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove snat allocs for CIDR %s: %w", cidrStr, err)
 			}
+		}
+	}
+
+	if controllerutil.ContainsFinalizer(npr, NPRBPFFinalizer) {
+		controllerutil.RemoveFinalizer(npr, NPRBPFFinalizer)
+		if err := r.Update(ctx, npr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 		}
 	}
 
@@ -88,7 +108,7 @@ func (r *NATPortRangeSyncReconciler) syncDeleted(npr *v1alpha1.NATPortRange) (ct
 	return ctrl.Result{}, nil
 }
 
-func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl.Result, error) {
+func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha1.NATPortRange) (ctrl.Result, error) {
 	r.mu.Lock()
 	cached := r.synced[npr.Name]
 	cachedCIDRsCopy := append([]string(nil), cached.TargetCIDRs...)
@@ -102,7 +122,7 @@ func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl
 	for _, a := range toRemove {
 		extIP := net.ParseIP(a.ExternalIP)
 		for _, proto := range syncProtos {
-			if err := r.BPF.RemovePortRange(extIP, podIP, uint16(a.PortStart), uint16(a.PortEnd), proto); err != nil {
+			if err := r.PortRangeLookup.Remove(extIP, podIP, uint16(a.PortStart), uint16(a.PortEnd), proto); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove port range: %w", err)
 			}
 		}
@@ -110,12 +130,17 @@ func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl
 	for _, a := range toAdd {
 		extIP := net.ParseIP(a.ExternalIP)
 		for _, proto := range syncProtos {
-			if err := r.BPF.AddPortRange(extIP, podIP, uint16(a.PortStart), uint16(a.PortEnd), proto); err != nil {
+			if err := r.PortRangeLookup.Add(extIP, podIP, uint16(a.PortStart), uint16(a.PortEnd), proto); err != nil {
 				return ctrl.Result{}, fmt.Errorf("add port range: %w", err)
 			}
 		}
 	}
 
+	// update snat_config
+	// remove/add snat_config entries for target cidrs
+	//   -> handles changes to target cidrs
+	// remove/add allocations in snat_config entries for ext ips in unchanged cidrs.
+	//   -> handles changes to allocations (ext-ip add/removal)
 	if npr.Spec.NodeName == r.NodeName {
 		removedCIDRs, addedCIDRs, commonCIDRs := diffStringSlices(cachedCIDRsCopy, npr.Spec.TargetCIDRs)
 
@@ -127,7 +152,7 @@ func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 				}
-				if err := r.BPF.RemoveSnatAllocs(podIP, cidr, oldExtIPs); err != nil {
+				if err := r.SnatConfig.RemoveAllocs(podIP, cidr, oldExtIPs); err != nil {
 					return ctrl.Result{}, fmt.Errorf("remove snat allocs for dropped CIDR %s: %w", cidrStr, err)
 				}
 			}
@@ -144,7 +169,7 @@ func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl
 				// See invariant note on RemoveSnatAllocs: correct only when
 				// NATConfig pools are non-overlapping (same ext-IP never in two
 				// different NPRs for the same pod and the same target CIDR).
-				if err := r.BPF.RemoveSnatAllocs(podIP, cidr, removedExtIPs); err != nil {
+				if err := r.SnatConfig.RemoveAllocs(podIP, cidr, removedExtIPs); err != nil {
 					return ctrl.Result{}, fmt.Errorf("remove snat allocs: %w", err)
 				}
 			}
@@ -158,7 +183,7 @@ func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl
 			}
 			for _, a := range npr.Spec.Allocations {
 				extIP := net.ParseIP(a.ExternalIP)
-				if err := r.BPF.UpsertSnatEntry(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+				if err := r.SnatConfig.Upsert(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
 					return ctrl.Result{}, fmt.Errorf("upsert snat entry: %w", err)
 				}
 			}
@@ -172,10 +197,20 @@ func (r *NATPortRangeSyncReconciler) syncAlive(npr *v1alpha1.NATPortRange) (ctrl
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 				}
-				if err := r.BPF.UpsertSnatEntry(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+				if err := r.SnatConfig.Upsert(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
 					return ctrl.Result{}, fmt.Errorf("upsert snat entry: %w", err)
 				}
 			}
+		}
+	}
+
+	// Add the finalizer after BPF maps are written. This ensures the NPR cannot
+	// be fully deleted before this daemon has had a chance to run syncDeleted
+	// and clean up those BPF entries — even across daemon restarts.
+	if !controllerutil.ContainsFinalizer(npr, NPRBPFFinalizer) {
+		controllerutil.AddFinalizer(npr, NPRBPFFinalizer)
+		if err := r.Update(ctx, npr); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 	}
 

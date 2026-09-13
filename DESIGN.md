@@ -481,18 +481,24 @@ Reconcile key: pod namespace/name.
 
 #### NATPortRangeRequest controller
 
-Watches: NATPortRangeRequest (cluster-scoped). Only processes NPRRs whose `spec.nodeName` equals
-this node's `NODE_NAME` — other nodes' NPRRs are skipped immediately.
+Watches: NATPortRangeRequest (cluster-scoped), cache-filtered to this node via a `spec.nodeName`
+field selector declared in the CRD `selectableFields` (Kubernetes ≥ 1.30). Only this node's NPRRs
+are held in the daemon's informer cache.
 
+Reconcile logic:
 1. `DeletionGracePeriodExpiry` nil → pod is alive; no action.
 2. `remaining = expiry - now > 0` → return `RequeueAfter: remaining`.
 3. `remaining ≤ 0` → delete the NPRR; Kubernetes GC cascades to delete the owned NATPortRange.
 
+**Startup syncer**: an `NPRRStartupSyncer` Runnable (registered with the manager) executes once
+immediately after the cache syncs. It lists all NPRRs for this node, checks whether the referenced
+pod still exists in the cache, and sets `DeletionGracePeriodExpiry = now + 240 s` on any NPRR
+whose pod is absent — covering pods that were deleted while the daemon was down.
+
 #### NATConfig controller
 
-Watches: NATConfig (cluster-scoped). Has two independent responsibilities.
-
-**BPF map sync** (`target_cidrs` and `ext_ip_pool` LPM maps — all nodes):
+Watches: NATConfig (cluster-scoped). Manages the `target_cidrs` and `ext_ip_pool` LPM BPF maps
+on all nodes.
 
 Maintains in-memory per-NATConfig tracking of which CIDRs it has written to each map. On any
 NATConfig event:
@@ -502,21 +508,9 @@ NATConfig event:
   CIDR (reference-counted across all NATConfigs).
 - Updates the per-NATConfig tracking.
 
-**NPRR lifecycle** — driven by NATConfig create/update/delete:
-
-Uses two field indices on `NATPortRangeRequest`:
-- `spec.podIdentity` (`{podNamespace}/{podName}`) — registered by the Pod controller
-- `spec.natConfig` — registered by this controller
-
-- **NATConfig created**: lists all local pods; evaluates `podSelector`; creates NPRRs for
-  matching pods not yet covered.
-- **NATConfig updated** (podSelector or any field change):
-  - New matching = local pods where the current `podSelector` matches.
-  - Previously matching = pods with an NPRR for this NATConfig (listed via `spec.natConfig` index).
-  - Creates NPRRs for newly matching pods; sets `DeletionGracePeriodExpiry` on NPRRs for pods
-    that no longer match.
-- **NATConfig deleted** (`NotFound`): lists all NPRRs for this NATConfig via `spec.natConfig`
-  index; sets `DeletionGracePeriodExpiry` on all of them.
+NPRR lifecycle is owned entirely by the Pod controller (NATConfig changes fan out to all local
+pods via `EnqueueRequestsFromMapFunc`). The NATConfig controller has no field index on
+`NATPortRangeRequest` and does not create or update NPRRs.
 
 #### NATPortRange sync controller
 
@@ -525,14 +519,19 @@ Watches: NATPortRange (all nodes watch all resources).
 Maintains an in-memory cache (`map[string]{TargetCIDRs, Allocations}`, key: NPR name) tracking
 what was last written to BPF maps. The cache starts empty at daemon startup — the first reconcile
 of each NPR re-adds all current allocations, idempotently repopulating the maps after a restart.
-Stale entries from removals that occurred while the daemon was down are cleaned up on the next NPR
-update.
+
+**Daemon finalizer** (`mooring.hanapedia.link/bpf-sync`): added to the NPR at the end of the
+first successful `syncAlive`. It prevents Kubernetes from fully deleting the NPR until
+`syncDeleted` has finished cleaning up BPF maps and explicitly removed the finalizer. Without
+this, a daemon restart between the GC deleting the NPR and the daemon running `syncDeleted` would
+leave stale port-range and snat_config entries in BPF maps indefinitely. `IsNotFound` in `Reconcile`
+therefore always means "this daemon never synced the NPR" and requires no BPF action.
 
 - **DeletionTimestamp set**: removes all entries in `spec.Allocations` from
   `port_range_lookup_{tcp,udp,icmp}` (all nodes). If `spec.nodeName == NODE_NAME`, iterates
   `spec.TargetCIDRs` and calls `RemoveSnatAllocs(podIP, cidr, uniqueExtIPs)` for each target CIDR
-  to remove that pod's `snat_config` entries, leaving allocations from other pods intact. Clears
-  the cache entry.
+  to remove that pod's `snat_config` entries, leaving allocations from other pods intact. Removes
+  the `mooring.hanapedia.link/bpf-sync` finalizer, then clears the cache entry.
 - **No DeletionTimestamp**: computes a minimal diff across two dimensions:
   - *Allocation diff* (`toRemove`, `toAdd`): from `spec.Allocations` vs cached allocations.
   - *Target-CIDR diff* (`removedCIDRs`, `addedCIDRs`, `commonCIDRs`): from `spec.TargetCIDRs`
@@ -579,9 +578,10 @@ component is deferred and not yet implemented.
 2. Daemon sets `NATPortRangeRequest.Status.DeletionGracePeriodExpiry = now + 240s` (covers
    `TIME_WAIT` expiry) and does nothing else immediately.
 3. After expiry, the daemon's `NATPortRangeRequest` reconciler deletes the request.
-4. Kubernetes GC deletes the owned `NATPortRange`.
-5. Daemons on all nodes see the `NATPortRange` deletion and clear the port-range lookup map
-   entries. Daemon on the pod's node also clears the SNAT config map entry.
+4. Kubernetes GC deletes the owned `NATPortRange` (blocked until all finalizers are removed).
+5. Daemons on all nodes see the `NATPortRange` `DeletionTimestamp`, clean up BPF maps, then
+   remove their `mooring.hanapedia.link/bpf-sync` finalizer. Once the last finalizer (the
+   operator's `mooring.hanapedia.link/allocation`) is removed, the NPR is garbage-collected.
 
 ### ExternalIPPool change
 

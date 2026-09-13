@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
+	"github.com/hanapedia/mooring/internal/controller/daemon"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -64,6 +65,59 @@ var _ = Describe("NPRR controller", func() {
 				var cur v1alpha1.NATPortRangeRequest
 				return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur))
 			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+		})
+	})
+
+	Describe("NPRRStartupSyncer", func() {
+		It("sets DeletionGracePeriodExpiry on an NPRR whose pod is gone", func() {
+			// Create an NPRR directly referencing a pod that does not exist,
+			// simulating the orphan-after-restart scenario.
+			nprr := makeNPRR("ghost-"+uniqueName("nprr"), testNodeName)
+			nprr.Spec.PodName = "ghost-pod"
+			nprr.Spec.PodNamespace = "default"
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+
+			syncer := &daemon.NPRRStartupSyncer{Client: k8sClient, NodeName: testNodeName}
+			Expect(syncer.Sync(ctx)).To(Succeed())
+
+			var cur v1alpha1.NATPortRangeRequest
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur)).To(Succeed())
+			Expect(cur.Status.DeletionGracePeriodExpiry).NotTo(BeNil())
+		})
+
+		It("does not touch an NPRR whose pod is still alive", func() {
+			// Use a pod that exists in the test namespace.
+			pod := makePod(uniqueName("pod"), "default", nil)
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+			nprr := makeNPRR(uniqueName("nprr"), testNodeName)
+			nprr.Spec.PodName = pod.Name
+			nprr.Spec.PodNamespace = pod.Namespace
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+
+			syncer := &daemon.NPRRStartupSyncer{Client: k8sClient, NodeName: testNodeName}
+			Expect(syncer.Sync(ctx)).To(Succeed())
+
+			var cur v1alpha1.NATPortRangeRequest
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur)).To(Succeed())
+			Expect(cur.Status.DeletionGracePeriodExpiry).To(BeNil())
+		})
+
+		It("skips NPRRs assigned to a different node", func() {
+			nprr := makeNPRR(uniqueName("nprr"), "other-node")
+			nprr.Spec.PodName = "ghost-pod"
+			nprr.Spec.PodNamespace = "default"
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+
+			syncer := &daemon.NPRRStartupSyncer{Client: k8sClient, NodeName: testNodeName}
+			Expect(syncer.Sync(ctx)).To(Succeed())
+
+			var cur v1alpha1.NATPortRangeRequest
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur)).To(Succeed())
+			Expect(cur.Status.DeletionGracePeriodExpiry).To(BeNil())
+
+			// Cleanup (other-node NPRRs won't be auto-deleted by the reconciler).
+			_ = k8sClient.Delete(ctx, nprr)
 		})
 	})
 

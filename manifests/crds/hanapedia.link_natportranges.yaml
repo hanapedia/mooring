@@ -65,9 +65,16 @@ spec:
               podNamespace:
                 type: string
               portRangeCount:
+                description: |-
+                  PortRangeCount mirrors NATPortRangeRequest.Spec.PortRangeCount so the
+                  NATConfig controller can read it without looking up the request.
                 format: int32
                 type: integer
               targetCIDRs:
+                description: |-
+                  TargetCIDRs mirrors NATConfig.Spec.TargetCIDRs so the daemon sync
+                  controller can key snat_config entries by (podIP, targetCIDR) without
+                  fetching the NATConfig on every reconcile.
                 items:
                   type: string
                 type: array

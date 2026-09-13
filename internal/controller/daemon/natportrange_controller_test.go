@@ -1,10 +1,13 @@
 package daemon_test
 
 import (
+	"slices"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
+	"github.com/hanapedia/mooring/internal/controller/daemon"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -34,6 +37,27 @@ func makeNPR(name, nodeName, podIP, extIP string, portStart, portEnd int32) *v1a
 	}
 }
 
+// hasBPFFinalizer returns true if cur carries the daemon BPF finalizer.
+func hasBPFFinalizer(name string) bool {
+	var cur v1alpha1.NATPortRange
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, &cur); err != nil {
+		return false
+	}
+	return slices.Contains(cur.Finalizers, daemon.NPRBPFFinalizer)
+}
+
+// removeFinalizers clears all finalizers so the NPR can be GC'd by envtest.
+func removeFinalizers(name string) {
+	Eventually(func() error {
+		var cur v1alpha1.NATPortRange
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, &cur); err != nil {
+			return err
+		}
+		cur.Finalizers = nil
+		return k8sClient.Update(ctx, &cur)
+	}, "5s", "100ms").Should(Succeed())
+}
+
 var _ = Describe("NATPortRange sync controller", func() {
 
 	Describe("AddPortRange on NPR creation", func() {
@@ -48,7 +72,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 			for _, proto := range []uint8{6, 17, 1} {
 				proto := proto
 				eventually(func() bool {
-					return mockPortRange.hasAdded(extIP, podIP, portStart, portEnd, proto)
+					return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, proto)
 				})
 			}
 		})
@@ -60,7 +84,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool {
-				return mockPortRange.hasUpsertedSnat(podIP, extIP)
+				return mockSnatConfig.hasUpserted(podIP, extIP)
 			})
 		})
 
@@ -72,12 +96,40 @@ var _ = Describe("NATPortRange sync controller", func() {
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool {
-				return mockPortRange.hasAdded(extIP, podIP, portStart, portEnd, 6)
+				return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, 6)
 			})
 			// Give the reconciler time to potentially (incorrectly) call UpsertSnat.
 			consistently(func() bool {
-				return !mockPortRange.hasUpsertedSnat(podIP, extIP)
+				return !mockSnatConfig.hasUpserted(podIP, extIP)
 			})
+		})
+	})
+
+	Describe("BPF finalizer", func() {
+		It("adds the bpf-sync finalizer after first sync", func() {
+			npr := makeNPR(uniqueName("npr"), testNodeName, "10.244.4.50", "203.0.115.10", 1900, 1999)
+			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
+
+			eventually(func() bool { return hasBPFFinalizer(npr.Name) })
+		})
+
+		It("removes the bpf-sync finalizer after BPF cleanup on deletion", func() {
+			extIP := "203.0.115.11"
+			podIP := "10.244.4.51"
+
+			// testFinalizer keeps the NPR alive so we can observe intermediate state.
+			npr := makeNPR(uniqueName("npr"), testNodeName, podIP, extIP, 2000, 2099)
+			npr.Finalizers = []string{testFinalizer}
+			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
+
+			eventually(func() bool { return hasBPFFinalizer(npr.Name) })
+
+			Expect(k8sClient.Delete(ctx, npr)).To(Succeed())
+
+			// syncDeleted must remove the daemon finalizer (testFinalizer still holds the NPR).
+			eventually(func() bool { return !hasBPFFinalizer(npr.Name) })
+
+			removeFinalizers(npr.Name)
 		})
 	})
 
@@ -87,38 +139,30 @@ var _ = Describe("NATPortRange sync controller", func() {
 			podIP := "10.244.4.20"
 			var portStart, portEnd uint16 = 1300, 1399
 
-			// Add finalizer so we can observe the terminating state.
+			// testFinalizer keeps the NPR alive so we can observe the terminating state.
 			npr := makeNPR(uniqueName("npr"), testNodeName, podIP, extIP, int32(portStart), int32(portEnd))
 			npr.Finalizers = []string{testFinalizer}
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			// Wait for initial sync (AddPortRange).
 			eventually(func() bool {
-				return mockPortRange.hasAdded(extIP, podIP, portStart, portEnd, 6)
+				return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, 6)
 			})
 
-			// Delete → DeletionTimestamp set, finalizer keeps the NPR alive.
+			// Delete → DeletionTimestamp set; testFinalizer keeps the NPR alive.
 			Expect(k8sClient.Delete(ctx, npr)).To(Succeed())
 
 			for _, proto := range []uint8{6, 17, 1} {
 				proto := proto
 				eventually(func() bool {
-					return mockPortRange.hasRemoved(extIP, podIP, portStart, portEnd, proto)
+					return mockPortRangeLookup.hasRemoved(extIP, podIP, portStart, portEnd, proto)
 				})
 			}
 			eventually(func() bool {
-				return mockPortRange.hasRemovedSnat(podIP)
+				return mockSnatConfig.hasRemoved(podIP)
 			})
 
-			// Cleanup: remove finalizer.
-			Eventually(func() error {
-				var cur v1alpha1.NATPortRange
-				if err := k8sClient.Get(ctx, client.ObjectKey{Name: npr.Name}, &cur); err != nil {
-					return err
-				}
-				cur.Finalizers = nil
-				return k8sClient.Update(ctx, &cur)
-			}, "5s", "100ms").Should(Succeed())
+			removeFinalizers(npr.Name)
 		})
 
 		It("calls RemovePortRange but not RemoveSnatAllocs for a remote-node NPR deletion", func() {
@@ -131,7 +175,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool {
-				return mockPortRange.hasAdded(extIP, podIP, portStart, portEnd, 6)
+				return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, 6)
 			})
 
 			Expect(k8sClient.Delete(ctx, npr)).To(Succeed())
@@ -139,22 +183,14 @@ var _ = Describe("NATPortRange sync controller", func() {
 			for _, proto := range []uint8{6, 17, 1} {
 				proto := proto
 				eventually(func() bool {
-					return mockPortRange.hasRemoved(extIP, podIP, portStart, portEnd, proto)
+					return mockPortRangeLookup.hasRemoved(extIP, podIP, portStart, portEnd, proto)
 				})
 			}
 			consistently(func() bool {
-				return !mockPortRange.hasRemovedSnat(podIP)
+				return !mockSnatConfig.hasRemoved(podIP)
 			})
 
-			// Cleanup.
-			Eventually(func() error {
-				var cur v1alpha1.NATPortRange
-				if err := k8sClient.Get(ctx, client.ObjectKey{Name: npr.Name}, &cur); err != nil {
-					return err
-				}
-				cur.Finalizers = nil
-				return k8sClient.Update(ctx, &cur)
-			}, "5s", "100ms").Should(Succeed())
+			removeFinalizers(npr.Name)
 		})
 	})
 
@@ -170,7 +206,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool {
-				return mockPortRange.hasAdded(oldExtIP, podIP, oldStart, oldEnd, 6)
+				return mockPortRangeLookup.hasAdded(oldExtIP, podIP, oldStart, oldEnd, 6)
 			})
 
 			// Replace the allocation.
@@ -186,10 +222,10 @@ var _ = Describe("NATPortRange sync controller", func() {
 			}, "5s", "100ms").Should(Succeed())
 
 			eventually(func() bool {
-				return mockPortRange.hasAdded(newExtIP, podIP, newStart, newEnd, 6)
+				return mockPortRangeLookup.hasAdded(newExtIP, podIP, newStart, newEnd, 6)
 			})
 			eventually(func() bool {
-				return mockPortRange.hasRemoved(oldExtIP, podIP, oldStart, oldEnd, 6)
+				return mockPortRangeLookup.hasRemoved(oldExtIP, podIP, oldStart, oldEnd, 6)
 			})
 		})
 	})

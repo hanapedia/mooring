@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,6 @@ import (
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/controller/daemon"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/fields"
@@ -40,8 +40,10 @@ var (
 	ctx           context.Context
 	cancel        context.CancelFunc
 	counter       atomic.Int64
-	mockLPM       *recordingLPMBPF
-	mockPortRange *recordingPortRangeBPF
+	mockTargetCIDR      *recordingTargetCIDRMap
+	mockExtIPPool       *recordingExtIPPoolMap
+	mockPortRangeLookup *recordingPortRangeLookupMap
+	mockSnatConfig      *recordingSnatConfigMap
 )
 
 func TestControllers(t *testing.T) {
@@ -72,8 +74,10 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
 
-	mockLPM = &recordingLPMBPF{}
-	mockPortRange = &recordingPortRangeBPF{}
+	mockTargetCIDR = &recordingTargetCIDRMap{}
+	mockExtIPPool = &recordingExtIPPoolMap{}
+	mockPortRangeLookup = &recordingPortRangeLookupMap{}
+	mockSnatConfig = &recordingSnatConfigMap{}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -83,6 +87,9 @@ var _ = BeforeSuite(func() {
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Pod{}: {
+					Field: fields.OneTermEqualSelector("spec.nodeName", testNodeName),
+				},
+				&v1alpha1.NATPortRangeRequest{}: {
 					Field: fields.OneTermEqualSelector("spec.nodeName", testNodeName),
 				},
 			},
@@ -100,9 +107,9 @@ var _ = BeforeSuite(func() {
 		NodeName: testNodeName,
 	}).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), testNodeName, mockLPM).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), mockTargetCIDR, mockExtIPPool).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRange).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockSnatConfig).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()
@@ -165,11 +172,6 @@ func getNPRR(name string) *v1alpha1.NATPortRangeRequest {
 
 func nprrExists(name string) bool { return getNPRR(name) != nil }
 
-func nprrGone(name string) bool {
-	var nprr v1alpha1.NATPortRangeRequest
-	return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKey{Name: name}, &nprr))
-}
-
 func eventually(fn func() bool) {
 	EventuallyWithOffset(1, fn, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 }
@@ -178,56 +180,56 @@ func consistently(fn func() bool) {
 	ConsistentlyWithOffset(1, fn, 2*time.Second, 200*time.Millisecond).Should(BeTrue())
 }
 
-// --- mock BPF implementations ---
+// --- mock BPF implementations (one type per BPF map) ---
 
-type recordingLPMBPF struct {
-	mu              sync.Mutex
-	addedTarget     []string
-	removedTarget   []string
-	addedExtIP      []string
-	removedExtIP    []string
+type recordingTargetCIDRMap struct {
+	mu      sync.Mutex
+	added   []string
+	removed []string
 }
 
-func (m *recordingLPMBPF) AddTargetCIDR(cidr *net.IPNet) error {
+func (m *recordingTargetCIDRMap) Add(cidr *net.IPNet) error {
 	m.mu.Lock(); defer m.mu.Unlock()
-	m.addedTarget = append(m.addedTarget, cidr.String())
+	m.added = append(m.added, cidr.String())
 	return nil
 }
-func (m *recordingLPMBPF) RemoveTargetCIDR(cidr *net.IPNet) error {
+func (m *recordingTargetCIDRMap) Remove(cidr *net.IPNet) error {
 	m.mu.Lock(); defer m.mu.Unlock()
-	m.removedTarget = append(m.removedTarget, cidr.String())
+	m.removed = append(m.removed, cidr.String())
 	return nil
 }
-func (m *recordingLPMBPF) AddExtIP(cidr *net.IPNet) error {
+func (m *recordingTargetCIDRMap) hasAdded(cidr string) bool {
 	m.mu.Lock(); defer m.mu.Unlock()
-	m.addedExtIP = append(m.addedExtIP, cidr.String())
-	return nil
+	return slices.Contains(m.added, cidr)
 }
-func (m *recordingLPMBPF) RemoveExtIP(cidr *net.IPNet) error {
+func (m *recordingTargetCIDRMap) hasRemoved(cidr string) bool {
 	m.mu.Lock(); defer m.mu.Unlock()
-	m.removedExtIP = append(m.removedExtIP, cidr.String())
-	return nil
+	return slices.Contains(m.removed, cidr)
 }
 
-func (m *recordingLPMBPF) hasAddedTarget(cidr string) bool {
-	m.mu.Lock(); defer m.mu.Unlock()
-	for _, c := range m.addedTarget { if c == cidr { return true } }
-	return false
+type recordingExtIPPoolMap struct {
+	mu      sync.Mutex
+	added   []string
+	removed []string
 }
-func (m *recordingLPMBPF) hasRemovedTarget(cidr string) bool {
+
+func (m *recordingExtIPPoolMap) Add(cidr *net.IPNet) error {
 	m.mu.Lock(); defer m.mu.Unlock()
-	for _, c := range m.removedTarget { if c == cidr { return true } }
-	return false
+	m.added = append(m.added, cidr.String())
+	return nil
 }
-func (m *recordingLPMBPF) hasAddedExtIP(cidr string) bool {
+func (m *recordingExtIPPoolMap) Remove(cidr *net.IPNet) error {
 	m.mu.Lock(); defer m.mu.Unlock()
-	for _, c := range m.addedExtIP { if c == cidr { return true } }
-	return false
+	m.removed = append(m.removed, cidr.String())
+	return nil
 }
-func (m *recordingLPMBPF) hasRemovedExtIP(cidr string) bool {
+func (m *recordingExtIPPoolMap) hasAdded(cidr string) bool {
 	m.mu.Lock(); defer m.mu.Unlock()
-	for _, c := range m.removedExtIP { if c == cidr { return true } }
-	return false
+	return slices.Contains(m.added, cidr)
+}
+func (m *recordingExtIPPoolMap) hasRemoved(cidr string) bool {
+	m.mu.Lock(); defer m.mu.Unlock()
+	return slices.Contains(m.removed, cidr)
 }
 
 type portRangeCall struct {
@@ -236,39 +238,23 @@ type portRangeCall struct {
 	proto              uint8
 }
 
-type snatCall struct{ podIP, extIP, targetCIDR string }
-type removeSnatCall struct{ podIP, targetCIDR string }
-
-type recordingPortRangeBPF struct {
+type recordingPortRangeLookupMap struct {
 	mu          sync.Mutex
 	addCalls    []portRangeCall
 	removeCalls []portRangeCall
-	upsertSnat  []snatCall
-	removeSnat  []removeSnatCall
 }
 
-func (m *recordingPortRangeBPF) AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
+func (m *recordingPortRangeLookupMap) Add(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	m.mu.Lock(); defer m.mu.Unlock()
 	m.addCalls = append(m.addCalls, portRangeCall{extIP.String(), podIP.String(), portStart, portEnd, proto})
 	return nil
 }
-func (m *recordingPortRangeBPF) RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
+func (m *recordingPortRangeLookupMap) Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	m.mu.Lock(); defer m.mu.Unlock()
 	m.removeCalls = append(m.removeCalls, portRangeCall{extIP.String(), podIP.String(), portStart, portEnd, proto})
 	return nil
 }
-func (m *recordingPortRangeBPF) UpsertSnatEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	m.upsertSnat = append(m.upsertSnat, snatCall{podIP.String(), extIP.String(), targetCIDR.String()})
-	return nil
-}
-func (m *recordingPortRangeBPF) RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	m.removeSnat = append(m.removeSnat, removeSnatCall{podIP.String(), targetCIDR.String()})
-	return nil
-}
-
-func (m *recordingPortRangeBPF) hasAdded(extIP, podIP string, portStart, portEnd uint16, proto uint8) bool {
+func (m *recordingPortRangeLookupMap) hasAdded(extIP, podIP string, portStart, portEnd uint16, proto uint8) bool {
 	m.mu.Lock(); defer m.mu.Unlock()
 	for _, c := range m.addCalls {
 		if c.extIP == extIP && c.podIP == podIP && c.portStart == portStart && c.portEnd == portEnd && c.proto == proto {
@@ -277,7 +263,7 @@ func (m *recordingPortRangeBPF) hasAdded(extIP, podIP string, portStart, portEnd
 	}
 	return false
 }
-func (m *recordingPortRangeBPF) hasRemoved(extIP, podIP string, portStart, portEnd uint16, proto uint8) bool {
+func (m *recordingPortRangeLookupMap) hasRemoved(extIP, podIP string, portStart, portEnd uint16, proto uint8) bool {
 	m.mu.Lock(); defer m.mu.Unlock()
 	for _, c := range m.removeCalls {
 		if c.extIP == extIP && c.podIP == podIP && c.portStart == portStart && c.portEnd == portEnd && c.proto == proto {
@@ -286,15 +272,37 @@ func (m *recordingPortRangeBPF) hasRemoved(extIP, podIP string, portStart, portE
 	}
 	return false
 }
-func (m *recordingPortRangeBPF) hasUpsertedSnat(podIP, extIP string) bool {
+
+type snatCall struct{ podIP, extIP, targetCIDR string }
+type removeSnatCall struct{ podIP, targetCIDR string }
+
+type recordingSnatConfigMap struct {
+	mu          sync.Mutex
+	upsertCalls []snatCall
+	removeCalls []removeSnatCall
+}
+
+func (m *recordingSnatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
 	m.mu.Lock(); defer m.mu.Unlock()
-	for _, c := range m.upsertSnat {
+	m.upsertCalls = append(m.upsertCalls, snatCall{podIP.String(), extIP.String(), targetCIDR.String()})
+	return nil
+}
+func (m *recordingSnatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
+	m.mu.Lock(); defer m.mu.Unlock()
+	m.removeCalls = append(m.removeCalls, removeSnatCall{podIP.String(), targetCIDR.String()})
+	return nil
+}
+func (m *recordingSnatConfigMap) hasUpserted(podIP, extIP string) bool {
+	m.mu.Lock(); defer m.mu.Unlock()
+	for _, c := range m.upsertCalls {
 		if c.podIP == podIP && c.extIP == extIP { return true }
 	}
 	return false
 }
-func (m *recordingPortRangeBPF) hasRemovedSnat(podIP string) bool {
+func (m *recordingSnatConfigMap) hasRemoved(podIP string) bool {
 	m.mu.Lock(); defer m.mu.Unlock()
-	for _, s := range m.removeSnat { if s.podIP == podIP { return true } }
+	for _, c := range m.removeCalls {
+		if c.podIP == podIP { return true }
+	}
 	return false
 }

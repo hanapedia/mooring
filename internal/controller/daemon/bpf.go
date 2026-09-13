@@ -6,51 +6,61 @@ import (
 	"github.com/hanapedia/mooring/internal/maps"
 )
 
-// PortRangeBPF abstracts the BPF map operations performed by the NATPortRange
-// sync controller. The real implementation delegates to the maps package; tests
-// inject a recording stub.
-type PortRangeBPF interface {
-	AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error
-	RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error
-	// UpsertSnatEntry updates the snat_config entry for (podIP, targetCIDR).
-	// Each (podIP, targetCIDR) pair is a separate BPF map entry so a pod matched
-	// by multiple NATConfigs gets independent ext-IP pools per target CIDR.
-	UpsertSnatEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error
-	// RemoveSnatAllocs removes allocations for the given extIPs from the
-	// (podIP, targetCIDR) snat_config entry.
-	RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error
+// TargetCIDRMap abstracts the target_cidrs LPM BPF map.
+type TargetCIDRMap interface {
+	Add(cidr *net.IPNet) error
+	Remove(cidr *net.IPNet) error
 }
 
-// LPMBPF abstracts the LPM map operations performed by the NATConfig
-// controller. The real implementation delegates to the maps package; tests
-// inject a recording stub.
-type LPMBPF interface {
-	AddTargetCIDR(cidr *net.IPNet) error
-	RemoveTargetCIDR(cidr *net.IPNet) error
-	AddExtIP(cidr *net.IPNet) error
-	RemoveExtIP(cidr *net.IPNet) error
+// ExtIPPoolMap abstracts the ext_ip_pool LPM BPF map.
+type ExtIPPoolMap interface {
+	Add(cidr *net.IPNet) error
+	Remove(cidr *net.IPNet) error
 }
 
-// RealPortRangeBPF is the production implementation of PortRangeBPF.
-type RealPortRangeBPF struct{}
+// PortRangeLookupMap abstracts the port_range_lookup HASH_OF_MAPS BPF map
+// (one outer map per IP protocol: TCP, UDP, ICMP).
+type PortRangeLookupMap interface {
+	Add(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error
+	Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error
+}
 
-func (RealPortRangeBPF) AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
+// SnatConfigMap abstracts the snat_config BPF map.
+// Each entry is keyed by (podIP, targetCIDR) and holds all external-IP allocations
+// for that (pod, target-CIDR) pair.
+type SnatConfigMap interface {
+	Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error
+	RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error
+}
+
+// RealTargetCIDRMap is the production implementation of TargetCIDRMap.
+type RealTargetCIDRMap struct{}
+
+func (RealTargetCIDRMap) Add(cidr *net.IPNet) error    { return maps.AddTargetCIDR(cidr) }
+func (RealTargetCIDRMap) Remove(cidr *net.IPNet) error { return maps.RemoveTargetCIDR(cidr) }
+
+// RealExtIPPoolMap is the production implementation of ExtIPPoolMap.
+type RealExtIPPoolMap struct{}
+
+func (RealExtIPPoolMap) Add(cidr *net.IPNet) error    { return maps.AddExtIP(cidr) }
+func (RealExtIPPoolMap) Remove(cidr *net.IPNet) error { return maps.RemoveExtIP(cidr) }
+
+// RealPortRangeLookupMap is the production implementation of PortRangeLookupMap.
+type RealPortRangeLookupMap struct{}
+
+func (RealPortRangeLookupMap) Add(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	return maps.AddPortRange(extIP, podIP, portStart, portEnd, proto)
 }
-func (RealPortRangeBPF) RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
+func (RealPortRangeLookupMap) Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	return maps.RemovePortRange(extIP, podIP, portStart, portEnd, proto)
 }
-func (RealPortRangeBPF) UpsertSnatEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
+
+// RealSnatConfigMap is the production implementation of SnatConfigMap.
+type RealSnatConfigMap struct{}
+
+func (RealSnatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
 	return maps.UpsertSnatEntry(podIP, targetCIDR, extIP, portStart, portEnd)
 }
-func (RealPortRangeBPF) RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
+func (RealSnatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
 	return maps.RemoveSnatAllocs(podIP, targetCIDR, extIPs)
 }
-
-// RealLPMBPF is the production implementation of LPMBPF.
-type RealLPMBPF struct{}
-
-func (RealLPMBPF) AddTargetCIDR(cidr *net.IPNet) error  { return maps.AddTargetCIDR(cidr) }
-func (RealLPMBPF) RemoveTargetCIDR(cidr *net.IPNet) error { return maps.RemoveTargetCIDR(cidr) }
-func (RealLPMBPF) AddExtIP(cidr *net.IPNet) error        { return maps.AddExtIP(cidr) }
-func (RealLPMBPF) RemoveExtIP(cidr *net.IPNet) error     { return maps.RemoveExtIP(cidr) }

@@ -33,6 +33,7 @@ type PodReconciler struct {
 	NodeName string
 }
 
+// Reconciles NPRR state based on Pod status and NATConfig's label selector
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var pod corev1.Pod
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
@@ -76,6 +77,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	terminating := !pod.DeletionTimestamp.IsZero()
 
 	if !terminating {
+		// create NPRR for each NC if missing
 		for ncName := range matchingNCs {
 			if _, ok := existingNCs[ncName]; ok {
 				continue
@@ -103,6 +105,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		_, stillMatches := matchingNCs[ncName]
 		shouldExpire := terminating || !stillMatches
 		if shouldExpire {
+			// add DeletionGracePeriodExpiry
 			if nprr.Status.DeletionGracePeriodExpiry == nil {
 				expiry := metav1.NewTime(time.Now().Add(deletionGracePeriod))
 				nprr.Status.DeletionGracePeriodExpiry = &expiry
@@ -123,6 +126,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	return ctrl.Result{}, nil
 }
 
+// handlePodGone handles cases where the Pod resource no longer exists in the cache
 func (r *PodReconciler) handlePodGone(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	identity := req.Namespace + "/" + req.Name
 	var nprrList v1alpha1.NATPortRangeRequestList
@@ -131,9 +135,11 @@ func (r *PodReconciler) handlePodGone(ctx context.Context, req ctrl.Request) (ct
 	}
 	for i := range nprrList.Items {
 		nprr := &nprrList.Items[i]
+		// nprr controller has deleted the nprr after waiting for DeletionGracePeriodExpiry
 		if !nprr.DeletionTimestamp.IsZero() {
 			continue
 		}
+		// add DeletionGracePeriodExpiry
 		if nprr.Status.DeletionGracePeriodExpiry == nil {
 			expiry := metav1.NewTime(time.Now().Add(deletionGracePeriod))
 			nprr.Status.DeletionGracePeriodExpiry = &expiry
@@ -147,6 +153,7 @@ func (r *PodReconciler) handlePodGone(ctx context.Context, req ctrl.Request) (ct
 
 func (r *PodReconciler) natConfigToPods(ctx context.Context, _ client.Object) []reconcile.Request {
 	var pods corev1.PodList
+	// lists from cache with only pods on this node
 	if err := r.List(ctx, &pods); err != nil {
 		return nil
 	}

@@ -53,7 +53,11 @@ func main() {
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
+				// cache only resources local to this node
 				&corev1.Pod{}: {
+					Field: fields.OneTermEqualSelector("spec.nodeName", nodeName),
+				},
+				&v1alpha1.NATPortRangeRequest{}: {
 					Field: fields.OneTermEqualSelector("spec.nodeName", nodeName),
 				},
 			},
@@ -80,13 +84,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := daemon.NewNATConfigReconciler(mgr.GetClient(), nodeName, daemon.RealLPMBPF{}).SetupWithManager(mgr); err != nil {
+	if err := daemon.NewNATConfigReconciler(mgr.GetClient(), daemon.RealTargetCIDRMap{}, daemon.RealExtIPPoolMap{}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATConfig controller")
 		os.Exit(1)
 	}
 
-	if err := daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), nodeName, daemon.RealPortRangeBPF{}).SetupWithManager(mgr); err != nil {
+	if err := daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), nodeName, daemon.RealPortRangeLookupMap{}, daemon.RealSnatConfigMap{}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATPortRange sync controller")
+		os.Exit(1)
+	}
+
+	if err := mgr.Add(&daemon.NPRRStartupSyncer{Client: mgr.GetClient(), NodeName: nodeName}); err != nil {
+		setupLog.Error(err, "unable to register NPRRStartupSyncer")
 		os.Exit(1)
 	}
 
