@@ -10,16 +10,13 @@ import (
 	"github.com/hanapedia/mooring/internal/allocator"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 type NATPortRangeRequestReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
 	Registry *AllocatorRegistry
 }
 
@@ -32,7 +29,11 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	var nprr v1alpha1.NATPortRangeRequest
 	if err := r.Get(ctx, req.NamespacedName, &nprr); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			// NPRR is gone — mark the paired NPR stale so all daemons clean up BPF maps.
+			return r.markNPRStale(ctx, req.Name)
+		}
+		return ctrl.Result{}, err
 	}
 
 	var nc v1alpha1.NATConfig
@@ -109,10 +110,6 @@ func (r *NATPortRangeRequestReconciler) createNPR(
 			PortRangeCount: int32(portRangeCount),
 			Allocations:    buildPortAllocations(allocations),
 		},
-	}
-	if err := controllerutil.SetControllerReference(nprr, &npr, r.Scheme); err != nil {
-		_ = alloc.Free(allocations)
-		return ctrl.Result{}, err
 	}
 	if err := r.Create(ctx, &npr); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -201,6 +198,25 @@ func (r *NATPortRangeRequestReconciler) decreaseCount(
 		return ctrl.Result{}, err
 	}
 	_ = alloc.Free(toFree)
+	return ctrl.Result{}, nil
+}
+
+// markNPRStale finds the NPR whose name matches the deleted NPRR and sets
+// StaleSince on it if not already set. This signals all daemons to clean up
+// their BPF maps before the operator removes the finalizer and deletes the NPR.
+func (r *NATPortRangeRequestReconciler) markNPRStale(ctx context.Context, name string) (ctrl.Result, error) {
+	var npr v1alpha1.NATPortRange
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, &npr); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if npr.Spec.StaleSince != nil {
+		return ctrl.Result{}, nil
+	}
+	now := metav1.Now()
+	npr.Spec.StaleSince = &now
+	if err := r.Update(ctx, &npr); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 

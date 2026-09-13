@@ -230,11 +230,13 @@ spec:
     - externalIP: 203.0.113.2
       portStart: 1700
       portEnd: 1799
+  staleSince: null      # set by daemon NPRR controller when pod grace period expires
 ```
 
 All daemon pods on every node watch `NATPortRange` resources and sync them into the stage 1
 port-range lookup BPF map. When `externalIPPool` changes on the NATConfig, the operator updates
-the `allocations` slice in place — no delete-and-recreate is required.
+the `allocations` slice in place — no delete-and-recreate is required. The operator's NATConfig
+controller skips NPRs with `staleSince` set to avoid re-adding BPF entries that are being cleaned up.
 
 ### NATPortRangeRequest
 

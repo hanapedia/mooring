@@ -1,6 +1,7 @@
 // +groupName=hanapedia.link
+// +kubebuilder:object:generate=true
 
-//go:generate go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0 object paths="./..." crd output:crd:artifacts:config=../../manifests/crds
+//go:generate go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0 object paths="github.com/hanapedia/mooring/api/..." crd output:crd:artifacts:config=../../manifests/crds
 
 package v1alpha1
 

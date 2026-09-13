@@ -28,8 +28,8 @@ var _ = Describe("NPRR controller", func() {
 		}
 	}
 
-	Describe("deletion when expiry has passed", func() {
-		It("deletes an NPRR whose DeletionGracePeriodExpiry is in the past", func() {
+	Describe("deletion when expiry has passed (no NPR)", func() {
+		It("deletes an NPRR immediately when DeletionGracePeriodExpiry is past and no NPR exists", func() {
 			nprr := makeNPRR(uniqueName("nprr"), testNodeName)
 			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
 
@@ -43,18 +43,17 @@ var _ = Describe("NPRR controller", func() {
 			}, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 		})
 
-		It("requeues and deletes once a future expiry elapses", func() {
+		It("requeues and deletes once a future expiry elapses (no NPR)", func() {
 			nprr := makeNPRR(uniqueName("nprr"), testNodeName)
 			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
 
-			// metav1.Time serializes to RFC3339 (1s granularity). Add 3s and
-			// truncate to seconds so the stored value is at least 2s in the future
-			// regardless of when within the current second we run.
+			// metav1.Time serializes to RFC3339 (1s granularity). Truncate so the
+			// stored value is reliably in the future regardless of sub-second timing.
 			future := metav1.NewTime(time.Now().Truncate(time.Second).Add(3 * time.Second))
 			nprr.Status.DeletionGracePeriodExpiry = &future
 			Expect(k8sClient.Status().Update(ctx, nprr)).To(Succeed())
 
-			// Should still exist well before the expiry.
+			// Should still exist before the expiry.
 			Consistently(func() bool {
 				var cur v1alpha1.NATPortRangeRequest
 				return k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur) == nil
@@ -86,7 +85,6 @@ var _ = Describe("NPRR controller", func() {
 		})
 
 		It("does not touch an NPRR whose pod is still alive", func() {
-			// Use a pod that exists in the test namespace.
 			pod := makePod(uniqueName("pod"), "default", nil)
 			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 
@@ -135,7 +133,6 @@ var _ = Describe("NPRR controller", func() {
 				return k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur) == nil
 			}, 2*time.Second, 200*time.Millisecond).Should(BeTrue())
 
-			// Cleanup.
 			_ = k8sClient.Delete(ctx, nprr)
 		})
 
@@ -148,7 +145,6 @@ var _ = Describe("NPRR controller", func() {
 				return k8sClient.Get(ctx, client.ObjectKey{Name: nprr.Name}, &cur) == nil
 			}, 2*time.Second, 200*time.Millisecond).Should(BeTrue())
 
-			// Cleanup.
 			_ = k8sClient.Delete(ctx, nprr)
 		})
 	})

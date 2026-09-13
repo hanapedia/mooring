@@ -79,13 +79,13 @@ var _ = BeforeSuite(func() {
 
 	Expect((&operator.NATPortRangeRequestReconciler{
 		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
 		Registry: registry,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&operator.NATPortRangeReconciler{
-		Client:   mgr.GetClient(),
-		Registry: registry,
+		Client:           mgr.GetClient(),
+		Registry:         registry,
+		BPFCleanupWindow: 500 * time.Millisecond,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&operator.NATConfigReconciler{

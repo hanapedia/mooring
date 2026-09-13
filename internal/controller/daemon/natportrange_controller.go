@@ -10,14 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
-
-// NPRBPFFinalizer is added to every NATPortRange by the daemon after it first
-// writes BPF maps. It prevents the NPR from disappearing from the API server
-// before the daemon has had a chance to clean up those BPF entries, even across
-// daemon restarts.
-const NPRBPFFinalizer = "mooring.hanapedia.link/bpf-sync"
 
 // syncProtos lists the IP protocols for which port_range_lookup maps are maintained.
 var syncProtos = []uint8{6, 17, 1} // TCP, UDP, ICMP
@@ -54,8 +47,6 @@ func (r *NATPortRangeSyncReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	var npr v1alpha1.NATPortRange
 	if err := r.Get(ctx, req.NamespacedName, &npr); err != nil {
 		if apierrors.IsNotFound(err) {
-			// NPRBPFFinalizer prevents deletion until BPF cleanup runs, so
-			// IsNotFound here means this daemon never synced the NPR.
 			r.mu.Lock()
 			delete(r.synced, req.Name)
 			r.mu.Unlock()
@@ -64,13 +55,19 @@ func (r *NATPortRangeSyncReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	if !npr.DeletionTimestamp.IsZero() {
-		return r.syncDeleted(ctx, &npr)
+	// StaleSince signals that all daemons should clean up their BPF maps.
+	// DeletionTimestamp means the NPR is being GC'd (after the cleanup window);
+	// treat it the same way so any daemon that missed the StaleSince event still
+	// gets a chance to clean up.
+	if npr.Spec.StaleSince != nil || !npr.DeletionTimestamp.IsZero() {
+		return r.syncStale(ctx, &npr)
 	}
 	return r.syncAlive(ctx, &npr)
 }
 
-func (r *NATPortRangeSyncReconciler) syncDeleted(ctx context.Context, npr *v1alpha1.NATPortRange) (ctrl.Result, error) {
+// syncStale removes all BPF entries for the NPR. It is idempotent and safe to
+// call multiple times (BPF Remove on a missing entry is a no-op).
+func (r *NATPortRangeSyncReconciler) syncStale(ctx context.Context, npr *v1alpha1.NATPortRange) (ctrl.Result, error) {
 	podIP := net.ParseIP(npr.Spec.PodIP)
 
 	for _, a := range npr.Spec.Allocations {
@@ -92,13 +89,6 @@ func (r *NATPortRangeSyncReconciler) syncDeleted(ctx context.Context, npr *v1alp
 			if err := r.SnatConfig.RemoveAllocs(podIP, cidr, extIPs); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove snat allocs for CIDR %s: %w", cidrStr, err)
 			}
-		}
-	}
-
-	if controllerutil.ContainsFinalizer(npr, NPRBPFFinalizer) {
-		controllerutil.RemoveFinalizer(npr, NPRBPFFinalizer)
-		if err := r.Update(ctx, npr); err != nil {
-			return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 		}
 	}
 
@@ -136,11 +126,6 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 		}
 	}
 
-	// update snat_config
-	// remove/add snat_config entries for target cidrs
-	//   -> handles changes to target cidrs
-	// remove/add allocations in snat_config entries for ext ips in unchanged cidrs.
-	//   -> handles changes to allocations (ext-ip add/removal)
 	if npr.Spec.NodeName == r.NodeName {
 		removedCIDRs, addedCIDRs, commonCIDRs := diffStringSlices(cachedCIDRsCopy, npr.Spec.TargetCIDRs)
 
@@ -201,16 +186,6 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 					return ctrl.Result{}, fmt.Errorf("upsert snat entry: %w", err)
 				}
 			}
-		}
-	}
-
-	// Add the finalizer after BPF maps are written. This ensures the NPR cannot
-	// be fully deleted before this daemon has had a chance to run syncDeleted
-	// and clean up those BPF entries — even across daemon restarts.
-	if !controllerutil.ContainsFinalizer(npr, NPRBPFFinalizer) {
-		controllerutil.AddFinalizer(npr, NPRBPFFinalizer)
-		if err := r.Update(ctx, npr); err != nil {
-			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 	}
 

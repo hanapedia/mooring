@@ -13,13 +13,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	deletionGracePeriod   = 240 * time.Second
+	podIdentityIndexField = ".spec.podIdentity"
+)
+
 type NPRRReconciler struct {
 	client.Client
 	NodeName string
 }
 
-// Reconcile deletes NPRR on DeletionGracePeriodExpiry
-// if DeletionGracePeriodExpiry still remains, reque after remaining duration
+// Reconcile manages the NPRR deletion lifecycle.
+// When DeletionGracePeriodExpiry is set and past, it deletes the NPRR.
+// The operator's NPR controller detects the missing NPRR and marks the
+// associated NPR stale, giving all daemons a window to clean up BPF maps.
 func (r *NPRRReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var nprr v1alpha1.NATPortRangeRequest
 	if err := r.Get(ctx, req.NamespacedName, &nprr); err != nil {
@@ -39,10 +46,7 @@ func (r *NPRRReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 
-	if err := r.Delete(ctx, &nprr); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, &nprr))
 }
 
 func (r *NPRRReconciler) SetupWithManager(mgr ctrl.Manager) error {

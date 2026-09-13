@@ -38,9 +38,10 @@ var _ = Describe("NATPortRangeRequest controller", func() {
 			// NPR must carry the allocation finalizer.
 			Expect(npr.Finalizers).To(ContainElement("mooring.hanapedia.link/allocation"))
 
-			// NPR must be owned by the NPRR.
-			Expect(npr.OwnerReferences).To(HaveLen(1))
-			Expect(npr.OwnerReferences[0].Name).To(Equal(nprr.Name))
+			// NPR has the same name as the NPRR and no owner reference (operator
+			// controls NPR lifecycle directly via StaleSince and BPFCleanupWindow).
+			Expect(npr.Name).To(Equal(nprr.Name))
+			Expect(npr.OwnerReferences).To(BeEmpty())
 		})
 
 		It("respects explicit portRangeCount > 1", func() {

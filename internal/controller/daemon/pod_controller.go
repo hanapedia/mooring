@@ -17,11 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-const (
-	deletionGracePeriod   = 240 * time.Second
-	podIdentityIndexField = ".spec.podIdentity"
-)
-
 // nprrName constructs the NATPortRangeRequest name for a given pod and NATConfig.
 // Convention: {podNamespace}-{podName}-{natConfigName}
 func nprrName(podNamespace, podName, natConfig string) string {

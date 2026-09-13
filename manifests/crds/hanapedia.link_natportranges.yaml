@@ -70,6 +70,14 @@ spec:
                   NATConfig controller can read it without looking up the request.
                 format: int32
                 type: integer
+              staleSince:
+                description: |-
+                  StaleSince is set by the daemon's NPRR controller when the pod's
+                  deletion grace period expires. All daemons react by cleaning up their
+                  BPF maps. After BPFCleanupWindow has elapsed the daemon deletes the
+                  NPRR, and GC cascades to delete this NPR.
+                format: date-time
+                type: string
               targetCIDRs:
                 description: |-
                   TargetCIDRs mirrors NATConfig.Spec.TargetCIDRs so the daemon sync
