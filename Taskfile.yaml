@@ -49,8 +49,12 @@ tasks:
       - clang-format -i bpf/*.c bpf/headers/maps.h bpf/headers/tc.h
 
   lint:
-    desc: Lint Go sources with golangci-lint
+    desc: Lint Go sources with golangci-lint (creates stub BPF .o files if absent)
     cmds:
+      - |
+        grep -rh '//go:embed .*\.o' internal/bpf/*.go 2>/dev/null \
+          | awk '{print "internal/bpf/"$2}' \
+          | xargs touch
       - golangci-lint run ./...
 
   pinact:
