@@ -60,7 +60,7 @@ type SnatEgressSnatConfigKey struct {
 
 type SnatEgressSnatConfigVal struct {
 	_           structs.HostLayout
-	Allocations [16]struct {
+	Allocations [256]struct {
 		_         structs.HostLayout
 		ExtIp     uint32
 		PortStart uint16

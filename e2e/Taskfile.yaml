@@ -9,6 +9,11 @@ vars:
   MOORING_IMAGE: '{{.MOORING_IMAGE | default "ghcr.io/hanapedia/mooring"}}'
   MOORING_TAG: '{{.MOORING_TAG | default "v0.1.0"}}'
 
+  OPERATOR_IMAGE: '{{.OPERATOR_IMAGE | default "ghcr.io/hanapedia/mooring-operator"}}'
+  OPERATOR_TAG: '{{.OPERATOR_TAG | default "dev"}}'
+  AGENT_IMAGE: '{{.AGENT_IMAGE | default "ghcr.io/hanapedia/mooring-agent"}}'
+  AGENT_TAG: '{{.AGENT_TAG | default "dev"}}'
+
   COIL_VERSION: '{{.COIL_VERSION | default "2.15.0"}}'
   COIL_TAG: '{{.COIL_TAG | default "2.15.0" }}'
   COIL_REPO: '{{.COIL_REPO | default "https://github.com/cybozu-go/coil.git"}}'
@@ -190,25 +195,53 @@ tasks:
         --set certgen.image.tag={{.CILIUM_CERTGEN_VERSION}}
         --set certgen.image.useDigest=false > network/cilium/upstream.yaml
 
-  install-mooring:
-    desc: Build, load, and install the mooring DaemonSet
+  install-mooring-crds:
+    desc: Apply mooring CRDs to the cluster
     cmds:
-      - task: build-mooring-image
-      - kind load docker-image {{.MOORING_IMAGE}}:{{.MOORING_TAG}} --name kind-with-bgp
+      - kubectl apply -f ../manifests/crds/
+
+  install-mooring:
+    desc: Build, load, and install the mooring operator and agent
+    cmds:
+      - task: build-operator-image
+      - task: build-agent-image
+      - kind load docker-image {{.OPERATOR_IMAGE}}:{{.OPERATOR_TAG}} --name kind-with-bgp
+      - kind load docker-image {{.AGENT_IMAGE}}:{{.AGENT_TAG}} --name kind-with-bgp
+      - task: install-mooring-crds
+      - |
+        yq '
+          (select(.kind == "Deployment")
+          .spec.template.spec.containers[]
+          | select(.name == "operator")
+          .image) = "{{.OPERATOR_IMAGE}}:{{.OPERATOR_TAG}}"
+        ' ../manifests/operator.yaml | kubectl apply -f -
       - |
         yq '
           (select(.kind == "DaemonSet")
           .spec.template.spec.containers[]
-          | select(.name == "mooring")
-          .image) = "{{.MOORING_IMAGE}}:{{.MOORING_TAG}}"
-        ' ../manifests/daemonset.yaml | kubectl apply -f -
-      - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring
+          | select(.name == "agent")
+          .image) = "{{.AGENT_IMAGE}}:{{.AGENT_TAG}}"
+        ' ../manifests/agent.yaml | kubectl apply -f -
+      - kubectl wait -n mooring-system --for=condition=available --timeout=300s deployment/mooring-operator
+      - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring-agent
 
   build-mooring-image:
-    desc: Build the mooring container image
+    desc: Build the moorctl container image (PoC / CLI use)
     dir: ..
     cmds:
       - docker build -t {{.MOORING_IMAGE}}:{{.MOORING_TAG}} .
+
+  build-operator-image:
+    desc: Build the mooring operator container image
+    dir: ..
+    cmds:
+      - docker build -t {{.OPERATOR_IMAGE}}:{{.OPERATOR_TAG}} -f images/operator/Dockerfile .
+
+  build-agent-image:
+    desc: Build the mooring agent container image
+    dir: ..
+    cmds:
+      - docker build -t {{.AGENT_IMAGE}}:{{.AGENT_TAG}} -f images/agent/Dockerfile .
 
   mooring-exec:
     desc: Run moorctl CMD on every mooring pod. Usage; task mooring-exec CMD="unload"
