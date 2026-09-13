@@ -1,5 +1,7 @@
 // +groupName=hanapedia.link
 
+//go:generate go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0 object paths="./..." crd output:crd:artifacts:config=../../manifests/crds
+
 package v1alpha1
 
 import (

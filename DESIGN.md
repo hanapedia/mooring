@@ -220,7 +220,9 @@ spec:
   podIP: 10.0.0.5
   nodeName: node-1
   natConfig: prod
-  portRangeCount: 1   # mirrors the NPRR value; used by NATConfig controller without reading NPRR
+  targetCIDRs:          # copied from NATConfig.spec.targetCIDRs at creation time
+    - "0.0.0.0/0"
+  portRangeCount: 1     # mirrors the NPRR value; used by NATConfig controller without reading NPRR
   allocations:
     - externalIP: 203.0.113.1
       portStart: 1300
@@ -278,24 +280,40 @@ performed by the daemon for closed connections.
 
 Used by stage 1 to resolve pod IP from an incoming return packet's `(external-IP, dst-port)`.
 
-One array map per external IP, indexed by port number (size 65536):
+Implemented as three `BPF_MAP_TYPE_HASH_OF_MAPS` maps (one per IP protocol: TCP, UDP, ICMP):
 
-| Index | Value |
-|---|---|
-| NAT-port (0–65535) | pod-IP (0 if unallocated) |
+- **Outer map**: keyed by `ext-IP (u32)`, value is the FD of the corresponding inner map.
+- **Inner map** (`BPF_MAP_TYPE_ARRAY`, 65536 entries): indexed by port number (host order); value is pod-IP (`u32`, 0 if unallocated).
 
-Type: `BPF_MAP_TYPE_ARRAY`. Updated by each daemon when `NATPortRange` resources change.
+| Outer key | Inner index | Inner value |
+|---|---|---|
+| ext-IP | NAT-port (0–65535) | pod-IP (0 if unallocated) |
+
+Each daemon syncs all `NATPortRange` resources into these maps regardless of node ownership, because any node can be the stage 1 revNAT node for a given return packet.
 
 ### SNAT config map (per node, outbound node only)
 
-Provides the outbound BPF program with the port ranges for each local client pod.
+Provides the outbound BPF program with the port ranges for each local client pod, scoped per target CIDR.
 
 | Field | Role |
 |---|---|
-| Key: `pod-IP` | Client pod |
-| Value: `[{externalIP, portStart, portEnd, nextPort}, ...]` | All allocated ranges; `nextPort` is an atomic counter for port selection |
+| Key: `{pod-IP, cidr-addr, cidr-prefixlen}` | Client pod + matched target CIDR |
+| Value: `[{externalIP, portStart, portEnd, nextPort}, ...]` | All allocated ranges for that (pod, target-CIDR) pair; `nextPort` is an atomic counter for port selection |
 
-Type: `BPF_MAP_TYPE_HASH`. Updated by the daemon when `NATPortRange` resources change.
+Type: `BPF_MAP_TYPE_HASH`, `max_entries = 65536`. Updated by the daemon when `NATPortRange` resources change.
+
+The compound key is necessary because a pod may match multiple NATConfigs with different target CIDRs — each target CIDR implies a distinct external IP pool. Keying by `(pod-IP, target-CIDR)` lets the egress program pick the correct ext-IP pool based on which CIDR the packet's destination fell into. As a side effect, each `(pod, target-CIDR)` entry has an independent set of `nextPort` counters, so the usable ports per (pod, target-CIDR) pair is the full range size rather than a fraction shared across pools.
+
+### Target CIDRs map
+
+LPM trie keyed on destination IP; hit means the packet is a candidate for SNAT.
+
+| Field | Role |
+|---|---|
+| Key: `{prefixlen, addr}` | Network CIDR |
+| Value: `{addr, prefixlen}` | The matching entry's own network address and prefix length |
+
+Type: `BPF_MAP_TYPE_LPM_TRIE`. The value stores the CIDR identity redundantly so the egress program can recover _which_ CIDR matched from the lookup result (BPF LPM returns the value of the matching entry, not its key) and construct the `snat_config` compound key.
 
 ---
 
@@ -310,9 +328,9 @@ The hook names below use the default (CNI-agnostic) TC attachment. See
 client pod
   │  src=pod-IP:pod-port, dst=server-IP:server-port
   ▼
-TC egress — node uplink  (all nodes; filtered by SNAT config map lookup)
-  │  matches dst against Gateway targetCIDRs
-  │  looks up pod-IP in SNAT config map → selects externalIP + allocates NAT-port
+TC egress — node uplink  (all nodes; filtered by target_cidrs LPM lookup)
+  │  looks up dst in target_cidrs LPM → matched CIDR {cidr-addr, cidr-prefixlen} (or miss → pass)
+  │  looks up (pod-IP, cidr-addr, cidr-prefixlen) in snat_config → selects externalIP + allocates NAT-port
   │  writes NAT table: {pod-IP, NAT-port, server-IP, server-port} → {pod-port}
   │  SNATs src: pod-IP:pod-port → externalIP:NAT-port
   ▼
@@ -428,25 +446,114 @@ skipped.
 
 ### Daemon
 
-Runs as a DaemonSet on all nodes.
+Runs as a DaemonSet on all nodes. Uses controller-runtime without leader election — every instance
+reconciles independently against its own node's state.
 
-Responsibilities:
-- Watches node-local pods (field selector `spec.nodeName={NODE_NAME}`); on pod add, creates
-  `NATPortRangeRequest` for each matching NATConfig; on pod delete, sets
-  `NATPortRangeRequest.Status.DeletionGracePeriodExpiry` to hold port ranges for 240 s (to cover
-  `TIME_WAIT` expiry).
-- Watches `NATPortRangeRequest`; after `DeletionGracePeriodExpiry` passes, deletes the request
-  (Kubernetes GC then deletes the owned `NATPortRange`).
-- Watches `NATConfig` selector changes; reconciles local pods to create or retire
-  `NATPortRangeRequest` resources.
-- Watches `NATPortRange` resources; syncs allocations into the SNAT config map (local node only)
-  and the per-protocol port-range lookup maps (all nodes).
-- Runs a BGP speaker that advertises all external IPs from all NATConfigs.
-- **Default mode**: attaches TC BPF programs to the node uplink once at startup via netlink; no
-  per-pod veth management; conntrack is bypassed via `bpf_redirect_neigh` on the transit path
-  (no iptables rules required).
-- **Cilium mode**: installs BPF programs via CiliumDatapathPlugin instead of direct TC attachment.
-- Performs periodic NAT table cleanup for stale entries.
+**BPF attachment**: calls `loader.EnsureLoaded(iface)` at startup. If maps and TCX links are
+already pinned from a previous run, the load step is skipped — existing programs continue running
+and in-flight connections are unaffected. In Cilium mode, programs are installed via
+CiliumDatapathPlugin instead of direct TC attachment.
+
+Four controllers run concurrently:
+
+#### Pod controller
+
+Watches: Pods, filtered to this node via a per-object cache field selector on `spec.nodeName`.
+Also triggered by NATConfig changes via `EnqueueRequestsFromMapFunc` fanning out to all cached
+local pods.
+
+Reconcile key: pod namespace/name.
+
+- **Pod not found** (fully deleted from cache): queries the `spec.podIdentity` field index
+  (`{podNamespace}/{podName}`) on `NATPortRangeRequest` to find all NPRRs for this pod; sets
+  `DeletionGracePeriodExpiry = now + 240 s` on any that lack it.
+- **Pod found, no IP yet** (`pod.Status.PodIP == ""`): requeues in 5 s.
+- **Pod found**: lists all NATConfigs; evaluates each `podSelector` against pod labels to build
+  a `matchingNCs` set; lists existing NPRRs for this pod via the `spec.podIdentity` index; then:
+  - For each matching NATConfig not already covered by an NPRR: creates a `NATPortRangeRequest`
+    named `{podNamespace}-{podName}-{natConfigName}`.
+  - For each existing NPRR whose NATConfig is absent from `matchingNCs` (NATConfig deleted or
+    selector narrowed): sets `DeletionGracePeriodExpiry` if not already set.
+  - If pod is terminating (`DeletionTimestamp` set): sets `DeletionGracePeriodExpiry` on all
+    remaining NPRRs for this pod.
+  - If pod is running and an NPRR has a stale `DeletionGracePeriodExpiry` (pod restarted during
+    the grace window): clears the expiry via a status subresource update.
+
+#### NATPortRangeRequest controller
+
+Watches: NATPortRangeRequest (cluster-scoped), cache-filtered to this node via a `spec.nodeName`
+field selector declared in the CRD `selectableFields` (Kubernetes ≥ 1.30). Only this node's NPRRs
+are held in the daemon's informer cache.
+
+Reconcile logic:
+1. `DeletionGracePeriodExpiry` nil → pod is alive; no action.
+2. `remaining = expiry - now > 0` → return `RequeueAfter: remaining`.
+3. `remaining ≤ 0` → delete the NPRR; Kubernetes GC cascades to delete the owned NATPortRange.
+
+**Startup syncer**: an `NPRRStartupSyncer` Runnable (registered with the manager) executes once
+immediately after the cache syncs. It lists all NPRRs for this node, checks whether the referenced
+pod still exists in the cache, and sets `DeletionGracePeriodExpiry = now + 240 s` on any NPRR
+whose pod is absent — covering pods that were deleted while the daemon was down.
+
+#### NATConfig controller
+
+Watches: NATConfig (cluster-scoped). Manages the `target_cidrs` and `ext_ip_pool` LPM BPF maps
+on all nodes.
+
+Maintains in-memory per-NATConfig tracking of which CIDRs it has written to each map. On any
+NATConfig event:
+- Computes new desired CIDRs from the current spec (empty set if the NATConfig was deleted).
+- Diffs against the previously tracked CIDRs for this NATConfig.
+- Adds new entries; removes dropped entries only if no other NATConfig still references the same
+  CIDR (reference-counted across all NATConfigs).
+- Updates the per-NATConfig tracking.
+
+NPRR lifecycle is owned entirely by the Pod controller (NATConfig changes fan out to all local
+pods via `EnqueueRequestsFromMapFunc`). The NATConfig controller has no field index on
+`NATPortRangeRequest` and does not create or update NPRRs.
+
+#### NATPortRange sync controller
+
+Watches: NATPortRange (all nodes watch all resources).
+
+Maintains an in-memory cache (`map[string]{TargetCIDRs, Allocations}`, key: NPR name) tracking
+what was last written to BPF maps. The cache starts empty at daemon startup — the first reconcile
+of each NPR re-adds all current allocations, idempotently repopulating the maps after a restart.
+
+**Daemon finalizer** (`mooring.hanapedia.link/bpf-sync`): added to the NPR at the end of the
+first successful `syncAlive`. It prevents Kubernetes from fully deleting the NPR until
+`syncDeleted` has finished cleaning up BPF maps and explicitly removed the finalizer. Without
+this, a daemon restart between the GC deleting the NPR and the daemon running `syncDeleted` would
+leave stale port-range and snat_config entries in BPF maps indefinitely. `IsNotFound` in `Reconcile`
+therefore always means "this daemon never synced the NPR" and requires no BPF action.
+
+- **DeletionTimestamp set**: removes all entries in `spec.Allocations` from
+  `port_range_lookup_{tcp,udp,icmp}` (all nodes). If `spec.nodeName == NODE_NAME`, iterates
+  `spec.TargetCIDRs` and calls `RemoveSnatAllocs(podIP, cidr, uniqueExtIPs)` for each target CIDR
+  to remove that pod's `snat_config` entries, leaving allocations from other pods intact. Removes
+  the `mooring.hanapedia.link/bpf-sync` finalizer, then clears the cache entry.
+- **No DeletionTimestamp**: computes a minimal diff across two dimensions:
+  - *Allocation diff* (`toRemove`, `toAdd`): from `spec.Allocations` vs cached allocations.
+  - *Target-CIDR diff* (`removedCIDRs`, `addedCIDRs`, `commonCIDRs`): from `spec.TargetCIDRs`
+    vs cached CIDRs.
+
+  Applies `RemovePortRange` / `AddPortRange` (TCP, UDP, ICMP) for changed allocations (all nodes).
+  If local node, drives `snat_config` updates:
+
+  | Changed dimension | Action |
+  |---|---|
+  | Allocation removed, CIDR unchanged | `RemoveSnatAllocs(podIP, cidr, removedExtIPs)` for each common CIDR |
+  | Allocation added, CIDR unchanged | `UpsertSnatEntry(podIP, cidr, extIP, ...)` for each common CIDR |
+  | CIDR removed entirely | `RemoveSnatAllocs(podIP, cidr, allOldExtIPs)` |
+  | CIDR added | `UpsertSnatEntry(podIP, cidr, extIP, ...)` for all current allocations |
+
+  Updates the cache entry with the new `{TargetCIDRs, Allocations}` state.
+
+#### BGP speaker
+
+A BGP speaker that advertises all external IPs from all NATConfigs as /32 routes via ECMP is
+planned. It is driven by a NATConfig watch and implemented as an embedded gobgp server. This
+component is deferred and not yet implemented.
 
 ---
 
@@ -471,9 +578,10 @@ Responsibilities:
 2. Daemon sets `NATPortRangeRequest.Status.DeletionGracePeriodExpiry = now + 240s` (covers
    `TIME_WAIT` expiry) and does nothing else immediately.
 3. After expiry, the daemon's `NATPortRangeRequest` reconciler deletes the request.
-4. Kubernetes GC deletes the owned `NATPortRange`.
-5. Daemons on all nodes see the `NATPortRange` deletion and clear the port-range lookup map
-   entries. Daemon on the pod's node also clears the SNAT config map entry.
+4. Kubernetes GC deletes the owned `NATPortRange` (blocked until all finalizers are removed).
+5. Daemons on all nodes see the `NATPortRange` `DeletionTimestamp`, clean up BPF maps, then
+   remove their `mooring.hanapedia.link/bpf-sync` finalizer. Once the last finalizer (the
+   operator's `mooring.hanapedia.link/allocation`) is removed, the NPR is garbage-collected.
 
 ### ExternalIPPool change
 
@@ -501,9 +609,11 @@ cleanup via the grace period mechanism.
 
 ## Limitations
 
-- **Max concurrent connections per pod per external IP** is bounded by the assigned port range
-  size. Pods with high connection churn should be assigned to a dedicated IP pool with a larger
-  default range size.
+- **Max concurrent connections per pod per (external IP, target CIDR)** is bounded by the assigned
+  port range size. Each `(pod, target-CIDR)` pair has its own independent `nextPort` counters, so
+  a pod matching N target CIDRs effectively multiplies its available NAT capacity by N. Pods with
+  high connection churn should use a dedicated NATConfig with a larger `portRangeSize` or finer
+  target CIDR splits.
 - **Requires BGP underlay** with pod CIDRs advertised (native routing). Overlay networks are not
   supported.
 - **Cilium mode requires** Cilium with BPF host routing and the CiliumDatapathPlugin API. It is
@@ -514,10 +624,18 @@ cleanup via the grace period mechanism.
 
 ## Open Questions
 
-- **Port selection across multiple external IPs**: fill-first (use one IP until range is exhausted,
-  then spill to the next) vs. round-robin per connection. Deferred to implementation.
-- **BPF map type for port-range lookup**: per-external-IP array (simple, O(1), ~256 KB per IP) is
-  the baseline; alternatives can be evaluated during implementation.
 - **TC program coexistence on the uplink**: if other tools (e.g. bandwidth shaping, observability)
   also attach TC programs to the node uplink, ordering and priority need to be defined. The
   default mode must document expected TC chain position.
+
+### Resolved
+
+- **Port selection across multiple external IPs**: fill-first — the egress program iterates
+  `snat_config.allocations[0..count-1]`, uses the first entry with a free slot (its `nextPort`
+  counter has not wrapped the range), and spills to the next entry only when the current one is
+  exhausted.
+- **BPF map type for port-range lookup**: `BPF_MAP_TYPE_HASH_OF_MAPS` with per-external-IP
+  inner `BPF_MAP_TYPE_ARRAY` maps of 65536 `u32` entries (~256 KB per IP). O(1) lookup by port
+  index; outer map is pinned; inner maps are referenced by FD stored in the outer map.
+- **snat_config map key**: compound `{pod-IP, cidr-addr, cidr-prefixlen}` so a pod matching
+  multiple NATConfigs gets independent ext-IP pools and port counters per target CIDR.

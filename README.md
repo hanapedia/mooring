@@ -202,16 +202,26 @@ status:
 
 ### Daemon (DaemonSet)
 
-- Watches node-local pods (field selector on `spec.nodeName`); creates `NATPortRangeRequest` for
-  new pods matching a NATConfig selector; sets the deletion grace period on pod removal.
-- Deletes `NATPortRangeRequest` after its grace period expires.
-- Watches `NATConfig` selector changes; reconciles local pods to create or retire requests.
-- Syncs `NATPortRange` resources into SNAT config (local node) and per-protocol port-range lookup
-  BPF maps (all nodes).
-- Runs a BGP speaker that advertises all external IPs from all NATConfigs.
-- Attaches TC BPF programs to the node uplink at startup via netlink (default mode; no per-pod TC
-  attachment); uses CiliumDatapathPlugin in Cilium mode.
-- Performs periodic NAT table cleanup for stale entries.
+Attaches TC BPF programs to the node uplink once at startup (`loader.EnsureLoaded`). If programs
+are already pinned from a prior run, the attach step is skipped — in-flight connections are
+unaffected. Four controllers run concurrently per node, all without leader election:
+
+- **Pod controller**: watches node-local pods (informer field-filtered to `spec.nodeName=NODE_NAME`).
+  On pod add, evaluates all NATConfig pod selectors and creates a `NATPortRangeRequest` for each
+  match. On pod delete or selector mismatch (NATConfig updated), sets
+  `DeletionGracePeriodExpiry = now + 240 s` on the corresponding NPRRs. On pod-not-found (fully
+  deleted from cache), finds NPRRs via a field index on `spec.podIdentity` and sets their expiry.
+  Also triggered by NATConfig events, fanning out to all cached local pods.
+- **NATPortRangeRequest controller**: filtered to NPRRs where `spec.nodeName == NODE_NAME`. When
+  `DeletionGracePeriodExpiry` is reached, deletes the NPRR — Kubernetes GC then deletes the owned
+  `NATPortRange`.
+- **NATConfig controller**: on NATConfig create/update/delete, syncs `target_cidrs` and
+  `ext_ip_pool` BPF maps (reference-counted across all NATConfigs); also creates or expires NPRRs
+  for local pods as their NATConfig membership changes.
+- **NATPortRange sync controller**: all nodes watch all `NATPortRange` resources. Maintains an
+  in-memory diff cache; on each reconcile applies the minimal `AddPortRange`/`RemovePortRange`
+  delta to `port_range_lookup_{tcp,udp,icmp}`. The local node additionally syncs `snat_config`
+  via `UpsertSnatEntry` / `RemoveSnatAllocs`.
 
 ## Update Resiliency
 

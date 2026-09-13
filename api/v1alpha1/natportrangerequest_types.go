@@ -24,6 +24,7 @@ type NATPortRangeRequestStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:subresource:status
+// +kubebuilder:selectablefield:JSONPath=".spec.nodeName"
 
 type NATPortRangeRequest struct {
 	metav1.TypeMeta   `json:",inline"`
