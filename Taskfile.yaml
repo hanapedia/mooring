@@ -37,6 +37,16 @@ tasks:
       - task: gen-vmlinux
       - task: gen-dev-headers
 
+  test:
+    desc: Run controller envtests (operator + daemon) using setup-envtest
+    env:
+      CGO_ENABLED: "0"
+    vars:
+      ENVTEST_ASSETS:
+        sh: setup-envtest use -p path
+    cmds:
+      - KUBEBUILDER_ASSETS={{.ENVTEST_ASSETS}} go test -mod=vendor ./internal/controller/...
+
   generate:
     desc: Generate Go BPF bindings from C sources (requires clang and task setup)
     dir: internal/bpf

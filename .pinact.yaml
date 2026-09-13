@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/suzuki-shunsuke/pinact/refs/heads/main/json-schema/pinact.json
+# pinact - https://github.com/suzuki-shunsuke/pinact
+version: 3
+
+# Require actions to be at least 7 days old before pinning, to avoid
+# supply-chain attacks that slip in via a brand-new release.
+min_age:
+  value: 7
+
+# Comment format appended after the pinned SHA.
+separator: "  # "
+
+# Scan both workflow files and composite actions.
+files:
+  - pattern: .github/workflows/*.yaml
+  - pattern: .github/workflows/*.yml
+  - pattern: .github/actions/**/action.yaml
+  - pattern: .github/actions/**/action.yml
+
+rules:
+  # Local composite actions use relative paths and have no version to pin.
+  - ignore: true
+    conditions:
+      - expr: |
+          ActionVersion == ""

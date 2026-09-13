@@ -33,6 +33,9 @@
               cilium-cli
               hubble
 
+              # Testing
+              setup-envtest
+
               # Utilities
               yq-go
               jq

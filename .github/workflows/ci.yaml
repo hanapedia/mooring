@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Controller tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: ./.github/actions/setup-nix
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.local/share/kubebuilder-envtest
+          key: envtest-${{ runner.os }}-${{ hashFiles('go.mod') }}
+
+      - name: Run controller tests
+        run: nix develop --command task test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: ./.github/actions/setup-nix
+
+      - name: Build operator and agent
+        run: |
+          nix develop --command sh -c '
+            CGO_ENABLED=0 go build -mod=vendor -o /dev/null ./cmd/operator &&
+            CGO_ENABLED=0 go build -mod=vendor -o /dev/null ./cmd/daemon
+          '
