@@ -14,7 +14,6 @@ import (
 )
 
 var _ = Describe("Pod controller", func() {
-
 	Describe("NPRR creation", func() {
 		It("creates an NPRR when a matching pod appears on this node", func() {
 			ncName := uniqueName("nc")

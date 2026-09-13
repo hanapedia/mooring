@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: ./.github/actions/setup-nix
+
+      - name: Check formatting
+        run: |
+          nix develop --command task fmt
+          git diff --exit-code
+
+      - name: Run linter
+        run: nix develop --command task lint
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ~/.local/share/kubebuilder-envtest
+          key: envtest-${{ runner.os }}-${{ hashFiles('go.mod') }}
+
+      - name: Run controller tests
+        run: nix develop --command task test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Build operator image
+        run: docker build -f images/operator/Dockerfile -t mooring-operator:ci .
+
+      - name: Build agent image
+        run: docker build -f images/agent/Dockerfile -t mooring-agent:ci .

@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	finalizerName        = "mooring.hanapedia.link/allocation"
+	finalizerName         = "mooring.hanapedia.link/allocation"
 	defaultPortRangeCount = uint16(1)
 )
 
@@ -89,4 +89,3 @@ func buildPortAllocations(allocations map[string][]allocator.Allocation) []v1alp
 	}
 	return result
 }
-

@@ -45,7 +45,6 @@ func markStale(name string) {
 }
 
 var _ = Describe("NATPortRange sync controller", func() {
-
 	Describe("AddPortRange on NPR creation", func() {
 		It("calls AddPortRange for all three protocols for a local-node NPR", func() {
 			extIP := "203.0.115.1"

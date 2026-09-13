@@ -12,14 +12,20 @@
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
           default = pkgs.mkShell {
+            LIBBPF_BPF_DIR = "${pkgs.libbpf}/include/bpf";
+
             nativeBuildInputs = with pkgs; [
               # BPF toolchain
               llvmPackages.clang-unwrapped
+              llvmPackages.llvm
               bpftools
               libbpf
+              pkg-config
 
               # Go
               go
+              gofumpt
+              golangci-lint
 
               # Task runner
               go-task
@@ -32,6 +38,9 @@
               kubectl
               cilium-cli
               hubble
+
+              # Testing
+              setup-envtest
 
               # Utilities
               yq-go

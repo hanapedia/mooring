@@ -5,6 +5,7 @@ includes:
   e2e:
     taskfile: ./e2e/Taskfile.yaml
     dir: ./e2e
+    optional: true
 
 tasks:
   gen-vmlinux:
@@ -17,10 +18,14 @@ tasks:
     vars:
       LIBBPF_BPF_DIR:
         sh: |
+          [ -n "${LIBBPF_BPF_DIR:-}" ] && echo "$LIBBPF_BPF_DIR" && exit 0
           for dir in /usr/include/bpf /usr/local/include/bpf; do
             [ -f "$dir/bpf_helpers.h" ] && echo "$dir" && exit 0
           done
-          find /nix/store -maxdepth 4 -name "bpf_helpers.h" 2>/dev/null \
+          if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libbpf 2>/dev/null; then
+            echo "$(pkg-config --variable=includedir libbpf)/bpf" && exit 0
+          fi
+          find /nix/store -maxdepth 6 -name "bpf_helpers.h" 2>/dev/null \
             | grep libbpf | sort | tail -1 | sed 's|/bpf_helpers.h||'
     cmds:
       - mkdir -p .dev-headers/bpf
@@ -36,6 +41,36 @@ tasks:
     cmds:
       - task: gen-vmlinux
       - task: gen-dev-headers
+
+  fmt:
+    desc: Format Go and C sources (gofumpt + clang-format; skips generated vmlinux.h)
+    cmds:
+      - gofumpt -l -w .
+      - clang-format -i bpf/*.c bpf/headers/maps.h bpf/headers/tc.h
+
+  lint:
+    desc: Lint Go sources with golangci-lint (creates stub BPF .o files if absent)
+    cmds:
+      - |
+        grep -rh '//go:embed .*\.o' internal/bpf/*.go 2>/dev/null \
+          | awk '{print "internal/bpf/"$2}' \
+          | xargs touch
+      - golangci-lint run ./...
+
+  pinact:
+    desc: Pin GitHub Actions workflow steps to commit SHAs
+    cmds:
+      - pinact run
+
+  test:
+    desc: Run controller envtests (operator + daemon) using setup-envtest
+    env:
+      CGO_ENABLED: "0"
+    vars:
+      ENVTEST_ASSETS:
+        sh: setup-envtest use -p path
+    cmds:
+      - KUBEBUILDER_ASSETS={{.ENVTEST_ASSETS}} go test ./internal/controller/...
 
   generate:
     desc: Generate Go BPF bindings from C sources (requires clang and task setup)

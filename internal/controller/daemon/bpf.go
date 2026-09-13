@@ -51,6 +51,7 @@ type RealPortRangeLookupMap struct{}
 func (RealPortRangeLookupMap) Add(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	return maps.AddPortRange(extIP, podIP, portStart, portEnd, proto)
 }
+
 func (RealPortRangeLookupMap) Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	return maps.RemovePortRange(extIP, podIP, portStart, portEnd, proto)
 }
@@ -61,6 +62,7 @@ type RealSnatConfigMap struct{}
 func (RealSnatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
 	return maps.UpsertSnatEntry(podIP, targetCIDR, extIP, portStart, portEnd)
 }
+
 func (RealSnatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
 	return maps.RemoveSnatAllocs(podIP, targetCIDR, extIPs)
 }

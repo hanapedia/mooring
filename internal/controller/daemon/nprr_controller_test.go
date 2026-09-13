@@ -14,7 +14,6 @@ import (
 )
 
 var _ = Describe("NPRR controller", func() {
-
 	makeNPRR := func(name, nodeName string) *v1alpha1.NATPortRangeRequest {
 		return &v1alpha1.NATPortRangeRequest{
 			ObjectMeta: metav1.ObjectMeta{Name: name},

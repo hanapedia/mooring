@@ -10,7 +10,6 @@ import (
 )
 
 var _ = Describe("NATConfig controller", func() {
-
 	Describe("BPF LPM map sync", func() {
 		It("adds target CIDRs and ext IPs to BPF on NATConfig creation", func() {
 			targetCIDR := "10.21.0.0/24"
