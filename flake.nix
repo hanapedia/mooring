@@ -20,6 +20,8 @@
 
               # Go
               go
+              gofumpt
+              golangci-lint
 
               # Task runner
               go-task

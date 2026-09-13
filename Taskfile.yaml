@@ -37,6 +37,22 @@ tasks:
       - task: gen-vmlinux
       - task: gen-dev-headers
 
+  fmt:
+    desc: Format Go and C sources (gofumpt + clang-format; skips generated vmlinux.h)
+    cmds:
+      - gofumpt -l -w .
+      - clang-format -i bpf/*.c bpf/headers/maps.h bpf/headers/tc.h
+
+  lint:
+    desc: Lint Go sources with golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  pinact:
+    desc: Pin GitHub Actions workflow steps to commit SHAs
+    cmds:
+      - pinact run
+
   test:
     desc: Run controller envtests (operator + daemon) using setup-envtest
     env:
