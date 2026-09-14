@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
+	"github.com/hanapedia/mooring/internal/routing"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,21 +16,23 @@ import (
 
 type NATConfigReconciler struct {
 	client.Client
-	TargetCIDRs TargetCIDRMap
-	ExtIPPool   ExtIPPoolMap
+	TargetCIDRs     TargetCIDRMap
+	ExtIPPool       ExtIPPoolMap
+	RouteAdvertiser routing.RouteAdvertiser
 
 	mu            sync.Mutex
 	ncTargetCIDRs map[string][]string // ncName → CIDRs last written to target_cidrs
 	ncExtIPCIDRs  map[string][]string // ncName → CIDRs last written to ext_ip_pool
 }
 
-func NewNATConfigReconciler(c client.Client, targetCIDRs TargetCIDRMap, extIPPool ExtIPPoolMap) *NATConfigReconciler {
+func NewNATConfigReconciler(c client.Client, targetCIDRs TargetCIDRMap, extIPPool ExtIPPoolMap, advertiser routing.RouteAdvertiser) *NATConfigReconciler {
 	return &NATConfigReconciler{
-		Client:        c,
-		TargetCIDRs:   targetCIDRs,
-		ExtIPPool:     extIPPool,
-		ncTargetCIDRs: make(map[string][]string),
-		ncExtIPCIDRs:  make(map[string][]string),
+		Client:          c,
+		TargetCIDRs:     targetCIDRs,
+		ExtIPPool:       extIPPool,
+		RouteAdvertiser: advertiser,
+		ncTargetCIDRs:   make(map[string][]string),
+		ncExtIPCIDRs:    make(map[string][]string),
 	}
 }
 
@@ -48,13 +51,13 @@ func (r *NATConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		desiredExtIPCIDRs = nc.Spec.ExternalIPPool
 	}
 
-	if err := r.syncBPFMaps(req.Name, desiredTargetCIDRs, desiredExtIPCIDRs); err != nil {
+	if err := r.syncBPFMaps(ctx, req.Name, desiredTargetCIDRs, desiredExtIPCIDRs); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *NATConfigReconciler) syncBPFMaps(ncName string, desiredTargetCIDRs, desiredExtIPCIDRs []string) error {
+func (r *NATConfigReconciler) syncBPFMaps(ctx context.Context, ncName string, desiredTargetCIDRs, desiredExtIPCIDRs []string) error {
 	r.mu.Lock()
 	oldTarget := r.ncTargetCIDRs[ncName]
 	oldExtIP := r.ncExtIPCIDRs[ncName]
@@ -65,6 +68,49 @@ func (r *NATConfigReconciler) syncBPFMaps(ncName string, desiredTargetCIDRs, des
 	}
 	if err := r.applyLPMDiff(ncName, oldExtIP, desiredExtIPCIDRs, r.ncExtIPCIDRs, r.ExtIPPool.Add, r.ExtIPPool.Remove); err != nil {
 		return fmt.Errorf("ext_ip_pool: %w", err)
+	}
+	// ncExtIPCIDRs is already updated by applyLPMDiff, so cidrUsedByOther
+	// sees the correct final state when deciding whether to withdraw.
+	if err := r.syncRoutes(ctx, ncName, oldExtIP, desiredExtIPCIDRs); err != nil {
+		return fmt.Errorf("routes: %w", err)
+	}
+	return nil
+}
+
+// syncRoutes advertises newly added pool CIDRs and withdraws dropped CIDRs
+// that are no longer referenced by any NATConfig. It mirrors the diff logic
+// of applyLPMDiff but calls RouteAdvertiser instead of a BPF map.
+func (r *NATConfigReconciler) syncRoutes(ctx context.Context, ncName string, oldCIDRs, newCIDRs []string) error {
+	oldSet := cidrSet(oldCIDRs)
+	newSet := cidrSet(newCIDRs)
+
+	for cidr := range newSet {
+		if _, ok := oldSet[cidr]; ok {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", cidr, err)
+		}
+		if err := r.RouteAdvertiser.AdvertisePrefix(ctx, ipNet); err != nil {
+			return fmt.Errorf("advertise %s: %w", cidr, err)
+		}
+	}
+
+	for cidr := range oldSet {
+		if _, ok := newSet[cidr]; ok {
+			continue
+		}
+		if r.cidrUsedByOther(ncName, cidr, r.ncExtIPCIDRs) {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", cidr, err)
+		}
+		if err := r.RouteAdvertiser.WithdrawPrefix(ctx, ipNet); err != nil {
+			return fmt.Errorf("withdraw %s: %w", cidr, err)
+		}
 	}
 	return nil
 }
