@@ -34,17 +34,17 @@ import (
 const testNodeName = "test-node"
 
 var (
-	testEnv              *envtest.Environment
-	k8sClient            client.Client
-	scheme               = apimruntime.NewScheme()
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	counter              atomic.Int64
-	mockTargetCIDR       *recordingTargetCIDRMap
-	mockExtIPPool        *recordingExtIPPoolMap
-	mockPortRangeLookup  *recordingPortRangeLookupMap
-	mockSnatConfig       *recordingSnatConfigMap
-	mockRouteAdvertiser  *recordingRouteAdvertiser
+	testEnv             *envtest.Environment
+	k8sClient           client.Client
+	scheme              = apimruntime.NewScheme()
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	counter             atomic.Int64
+	mockTargetCIDR      *recordingTargetCIDRMap
+	mockExtIPPool       *recordingExtIPPoolMap
+	mockPortRangeLookup *recordingPortRangeLookupMap
+	mockSnatConfig      *recordingSnatConfigMap
+	mockRouteAdvertiser *recordingRouteAdvertiser
 )
 
 func TestControllers(t *testing.T) {
@@ -344,7 +344,7 @@ func (m *recordingSnatConfigMap) hasRemoved(podIP string) bool {
 }
 
 type recordingRouteAdvertiser struct {
-	mu        sync.Mutex
+	mu         sync.Mutex
 	advertised []string
 	withdrawn  []string
 }

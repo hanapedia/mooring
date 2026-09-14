@@ -16,8 +16,8 @@ import (
 
 type NATConfigReconciler struct {
 	client.Client
-	TargetCIDRs    TargetCIDRMap
-	ExtIPPool      ExtIPPoolMap
+	TargetCIDRs     TargetCIDRMap
+	ExtIPPool       ExtIPPoolMap
 	RouteAdvertiser routing.RouteAdvertiser
 
 	mu            sync.Mutex
