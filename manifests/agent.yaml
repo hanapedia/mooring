@@ -85,6 +85,16 @@ spec:
               fieldPath: spec.nodeName
         - name: NODE_IFACE
           value: "node0"
+        - name: BGP_LOCAL_ASN
+          value: "64798"
+        - name: BGP_REMOTE_ASN
+          value: "64799"
+        - name: BGP_ROUTER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: BGP_PEER_ADDR
+          value: "127.0.0.1"
         securityContext:
           privileged: true
           runAsUser: 0
