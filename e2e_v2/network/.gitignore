@@ -3,4 +3,3 @@ cluster.clab.yaml
 clab-kind-with-bgp
 coil/coil-config.yaml
 coil/upstream.yaml
-cilium/upstream.yaml

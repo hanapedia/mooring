@@ -11,14 +11,8 @@
   tor_iface: net2
   tor_bridge: br0
 - name: worker2
-  ip: 10.69.1.2/24
-  gw: 10.69.1.1
-  tor: clab-kind-with-bgp-tor1
-  tor_iface: net1
-  tor_bridge: br0
-- name: worker3
-  ip: 10.69.2.2/24
-  gw: 10.69.2.1
-  tor: clab-kind-with-bgp-tor2
-  tor_iface: net1
+  ip: 10.69.0.4/24
+  gw: 10.69.0.1
+  tor: clab-kind-with-bgp-tor0
+  tor_iface: net3
   tor_bridge: br0

@@ -1,0 +1,93 @@
+name: kind-with-bgp
+topology:
+  nodes:
+    # kind nodes
+    # ref: ./cluster.kind.yaml
+    kind-with-bgp:
+      kind: k8s-kind
+      image: kindest/node:v__K8S_VERSION__
+      startup-config: cluster.kind.yaml
+      extras:
+        k8s_kind:
+          deploy:
+            wait: 0s
+    kind-with-bgp-control-plane:
+      kind: ext-container
+    kind-with-bgp-worker:
+      kind: ext-container
+    kind-with-bgp-worker2:
+      kind: ext-container
+    control-plane:
+      network-mode: container:kind-with-bgp-control-plane
+      kind: linux
+      image: bird:BIRD_VERSION-kind-with-bgp
+      binds:
+        - bird/control-plane.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __CONTROL_PLANE_IP__ dev node0
+      - ip route replace default via __CONTROL_PLANE_GW__ dev node0
+    worker:
+      network-mode: container:kind-with-bgp-worker
+      kind: linux
+      image: bird:BIRD_VERSION-kind-with-bgp
+      binds:
+        - bird/worker.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __WORKER_IP__ dev node0
+      - ip route replace default via __WORKER_GW__ dev node0
+    worker2:
+      network-mode: container:kind-with-bgp-worker2
+      kind: linux
+      image: bird:BIRD_VERSION-kind-with-bgp
+      binds:
+        - bird/worker2.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add __WORKER2_IP__ dev node0
+      - ip route replace default via __WORKER2_GW__ dev node0
+    # Single ToR switch connecting all nodes
+    tor0:
+      kind: linux
+      image: bird:BIRD_VERSION-kind-with-bgp
+      binds:
+        - bird/tor0.conf:/etc/bird/bird.conf
+      exec:
+      - ip link add br0 type bridge
+      - ip addr add 10.69.0.1/24 dev br0
+      - ip link set br0 up
+      - ip link set net1 master br0
+      - ip link set net2 master br0
+      - ip link set net3 master br0
+      - ip addr add 10.72.0.2/30 dev net0
+      - ip route replace default via 10.72.0.1 dev net0
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    # Upstream router connected to tor0.
+    router0:
+      kind: linux
+      image: bird:BIRD_VERSION-kind-with-bgp
+      binds:
+        - bird/router0.conf:/etc/bird/bird.conf
+      exec:
+      - ip addr add 10.72.0.1/30 dev net0
+      - ip addr add 192.168.0.101/24 dev domestic0
+      - ip addr add 192.168.10.101/24 dev domestic1
+      - sysctl -w net.ipv4.ip_forward=1
+      - sysctl -w net.ipv4.fib_multipath_hash_policy=1
+    domestic0:
+      kind: linux
+      image: ghcr.io/cybozu/ubuntu-debug:24.04
+      exec:
+      - ip addr add 192.168.0.100/24 dev net0
+      - ip route replace default via 192.168.0.101 dev net0
+    domestic1:
+      kind: linux
+      image: ghcr.io/cybozu/testhttpd:0
+      exec:
+      - ip addr add 192.168.10.100/24 dev net0
+      - ip route replace default via 192.168.10.101 dev net0
+  links:
+    - endpoints: ["tor0:net1", "control-plane:node0"]
+    - endpoints: ["tor0:net2", "worker:node0"]
+    - endpoints: ["tor0:net3", "worker2:node0"]
+    - endpoints: ["router0:net0", "tor0:net0"]
+    - endpoints: ["router0:domestic0", "domestic0:net0"]
+    - endpoints: ["router0:domestic1", "domestic1:net0"]

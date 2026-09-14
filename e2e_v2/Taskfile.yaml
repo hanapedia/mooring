@@ -4,7 +4,6 @@ version: '3'
 vars:
   K8S_VERSION: '{{.K8S_VERSION | default "1.34.8"}}'
   BIRD_VERSION: '{{.BIRD_VERSION | default "3.2.2.1"}}'
-  CONTAINERLAB_VERSION: '{{.CONTAINERLAB_VERSION | default "0.78.2"}}'
 
   MOORING_IMAGE: '{{.MOORING_IMAGE | default "ghcr.io/hanapedia/mooring"}}'
   MOORING_TAG: '{{.MOORING_TAG | default "v0.1.0"}}'
@@ -19,21 +18,10 @@ vars:
   COIL_REPO: '{{.COIL_REPO | default "https://github.com/cybozu-go/coil.git"}}'
   COIL_DIR: '{{.COIL_DIR | default "/tmp/coil"}}'
   COIL_IMAGE: '{{.COIL_IMAGE | default "ghcr.io/cybozu-go/coil"}}'
-  CILIUM_REPO: '{{.CILIUM_REPO | default "https://github.com/cilium/cilium.git"}}'
-  CILIUM_DIR: '{{.CILIUM_DIR | default "/tmp/cilium"}}'
-  CILIUM_IMAGE: '{{.CILIUM_IMAGE | default "ghcr.io/cybozu/cilium"}}'
-  CILIUM_VERSION: '{{.CILIUM_VERSION | default "1.17.12.3"}}'
-  CILIUM_TAG: '{{.CILIUM_TAG | default "1.17.12.3"}}'
-  CILIUM_OPERATOR_IMAGE: '{{.CILIUM_OPERATOR_IMAGE | default "ghcr.io/cybozu/cilium-operator-generic"}}'
-  CILIUM_OPERATOR_VERSION: '{{.CILIUM_OPERATOR_VERSION | default "1.17.12.2"}}'
-  CILIUM_OPERATOR_TAG: '{{.CILIUM_OPERATOR_TAG | default "1.17.12.2"}}'
-  HUBBLE_RELAY_VERSION: '{{.HUBBLE_RELAY_VERSION | default "1.17.12.2"}}'
-  CILIUM_CERTGEN_VERSION: '{{.CILIUM_CERTGEN_VERSION | default "0.4.4.1"}}'
 
   # debug container images
   UBUNTU_DEBUG_IMAGE: ghcr.io/cybozu/ubuntu-debug:24.04
   TESTHTTPD_IMAGE: ghcr.io/cybozu/testhttpd:0
-  TCP_KEEPALIVE_IMAGE: ghcr.io/cybozu/tcp-keepalive:0
 
 tasks:
   start:
@@ -43,9 +31,7 @@ tasks:
       - task: start-kind-without-cni
       - task: pull-and-load-debug-images
       - task: generate-coil-upstream-manifests
-      # - task: generate-cilium-upstream-manifests
       - task: install-coil
-      # - task: install-cilium
       - task: wait-coil
       - task: install-mooring
       - task: apply-sample-resources
@@ -59,7 +45,6 @@ tasks:
     desc: Start kind cluster without kube-proxy and CNI
     dir: network
     cmds:
-      - sudo mkdir -p /var/lib/docker/volumes/ghcr-registry-data/_data
       - task: generate-cluster-clab-yaml
       - sudo containerlab deploy -t cluster.clab.yaml
       - kind export kubeconfig --name kind-with-bgp
@@ -79,14 +64,11 @@ tasks:
       - task: docker-pull
         vars: { IMAGE_NAME: "{{.TESTHTTPD_IMAGE}}" }
       - kind load docker-image {{.TESTHTTPD_IMAGE}} --name kind-with-bgp
-      - task: docker-pull
-        vars: { IMAGE_NAME: "{{.TCP_KEEPALIVE_IMAGE}}" }
-      - kind load docker-image {{.TCP_KEEPALIVE_IMAGE}} --name kind-with-bgp
 
   install-coil:
     desc: Install Coil CNI
     vars:
-      # Make sure `task generate-coil-upstream-menifests` is run before this task
+      # Make sure `task generate-coil-upstream-manifests` is run before this task
       COIL_CONFIG_NAME:
         sh: yq 'select(.kind=="ConfigMap") |.metadata.name' network/coil/upstream.yaml
     cmds:
@@ -154,47 +136,6 @@ tasks:
         CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
         sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml
 
-  install-cilium:
-    desc: Install Cilium CNI
-    cmds:
-      - task: docker-pull
-        vars: { IMAGE_NAME: "{{.CILIUM_IMAGE}}:{{.CILIUM_TAG}}" }
-      - task: docker-pull
-        vars: { IMAGE_NAME: "{{.CILIUM_OPERATOR_IMAGE}}:{{.CILIUM_OPERATOR_TAG}}" }
-      - kind load docker-image {{.CILIUM_IMAGE}}:{{.CILIUM_TAG}} --name kind-with-bgp
-      - kind load docker-image {{.CILIUM_OPERATOR_IMAGE}}:{{.CILIUM_OPERATOR_TAG}} --name kind-with-bgp
-      - kustomize build network/cilium | kubectl apply -f -
-      - kubectl wait -n kube-system --for=condition=available --timeout=300s deployment/cilium-operator
-      - kubectl wait -n kube-system --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=cilium-agent
-      - kubectl apply -f network/cilium/loadbalancer.yaml
-      - sleep 60 # waiting all network infrastructure are ready
-
-  generate-cilium-upstream-manifests:
-    desc: Generate Cilium upstream manifests
-    vars:
-      CILIUM_OPERATOR_IMAGE_STRIPPED:
-        sh: echo "{{.CILIUM_OPERATOR_IMAGE}}" | sed 's/-generic//'
-    cmds:
-      - task: clone-cilium
-      - task: checkout-cilium
-      - >
-        helm template {{.CILIUM_DIR}}/install/kubernetes/cilium/
-        --namespace=kube-system
-        --kube-version={{.K8S_VERSION}}
-        --values network/cilium/values.yaml
-        --set image.repository={{.CILIUM_IMAGE}}
-        --set image.tag={{.CILIUM_TAG}}
-        --set image.useDigest=false
-        --set operator.image.repository={{.CILIUM_OPERATOR_IMAGE_STRIPPED}}
-        --set operator.image.tag={{.CILIUM_OPERATOR_TAG}}
-        --set operator.image.useDigest=false
-        --set hubble.relay.image.repository=ghcr.io/cybozu/hubble-relay
-        --set hubble.relay.image.tag={{.HUBBLE_RELAY_VERSION}}
-        --set hubble.relay.image.useDigest=false
-        --set certgen.image.repository=ghcr.io/cybozu/cilium-certgen
-        --set certgen.image.tag={{.CILIUM_CERTGEN_VERSION}}
-        --set certgen.image.useDigest=false > network/cilium/upstream.yaml
-
   install-mooring-crds:
     desc: Apply mooring CRDs to the cluster
     cmds:
@@ -225,12 +166,6 @@ tasks:
       - kubectl wait -n mooring-system --for=condition=available --timeout=300s deployment/mooring-operator
       - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring-agent
 
-  build-mooring-image:
-    desc: Build the moorctl container image (PoC / CLI use)
-    dir: ..
-    cmds:
-      - docker build -t {{.MOORING_IMAGE}}:{{.MOORING_TAG}} .
-
   build-operator-image:
     desc: Build the mooring operator container image
     dir: ..
@@ -254,40 +189,7 @@ tasks:
           kubectl exec -n mooring-system "$pod" -c mooring -- moorctl {{.CMD}}
         done
 
-  mooring-unload:
-    desc: Run moorctl unload on every mooring pod
-    cmds:
-      - task: mooring-exec
-        vars: { CMD: "unload" }
-
   # ── domestic1 e2e ─────────────────────────────────────────────────────────────
-
-  e2e-domestic1:
-    desc: Full domestic1 e2e scenario (setup then test)
-    cmds:
-      - task: e2e-domestic1-setup
-      - task: e2e-domestic1-test
-
-  e2e-domestic1-setup:
-    desc: Wire up SNAT for domestic1-client (ext prefix 192.168.10.0/26 is baked into worker2 bird config)
-    vars:
-      EXT_IP: '192.168.10.0'
-      PORT_START: '1000'
-      PORT_END: '1099'
-    cmds:
-      # Step 1: domestic1-client nodeSelector already pins it to kind-with-bgp-worker.
-      #         Just wait for it to be scheduled and ready.
-      - kubectl wait deployment/domestic1-client -n default --for condition=Available --timeout 60s
-      # Step 2: add per-pod SNAT config and port range to all mooring instances.
-      #         POD_IP is resolved here, after the wait above, so the pod is ready.
-      - task: mooring-add-client
-        vars:
-          POD_IP:
-            sh: kubectl get pod -n default -l app=domestic1-client -o jsonpath='{.items[0].status.podIP}'
-          EXT_IP: "{{.EXT_IP}}"
-          PORT_START: "{{.PORT_START}}"
-          PORT_END: "{{.PORT_END}}"
-
   e2e-domestic1-test:
     desc: Curl domestic1 server (192.168.10.100:8000) from domestic1-client pod
     cmds:
@@ -295,116 +197,6 @@ tasks:
         POD=$(kubectl get pod -n default -l app=domestic1-client -o name | head -1)
         kubectl exec -n default "${POD}" -- curl -s --max-time 10 192.168.10.100:8000
         kubectl exec -n default "${POD}" -- ping -c 3 192.168.10.100
-
-
-  mooring-add-client:
-    desc: Add SNAT config and port range for a client pod on every mooring instance
-    vars:
-      POD_IP: '{{.POD_IP | default ""}}'
-      EXT_IP: '{{.EXT_IP | default ""}}'
-      PORT_START: '{{.PORT_START | default "1000"}}'
-      PORT_END: '{{.PORT_END | default "1099"}}'
-    cmds:
-      - task: mooring-exec
-        vars:
-          CMD: >-
-            map snat-config add
-            --pod-ip {{.POD_IP}}
-            --ext-ip {{.EXT_IP}}
-            --port-start {{.PORT_START}}
-            --port-end {{.PORT_END}}
-      - task: mooring-exec
-        vars:
-          CMD: >-
-            map port-range add
-            --ext-ip {{.EXT_IP}}
-            --pod-ip {{.POD_IP}}
-            --port-start {{.PORT_START}}
-            --port-end {{.PORT_END}}
-
-  # ── diagnostics ───────────────────────────────────────────────────────────────
-
-  mooring-logs:
-    desc: Print logs from every mooring pod
-    cmds:
-      - |
-        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
-          echo "=== $pod ==="
-          kubectl logs -n mooring-system "$pod" -c mooring --tail=50
-        done
-
-  mooring-diag:
-    desc: Check bpffs pin state on every mooring pod
-    cmds:
-      - |
-        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
-          echo "=== $pod ==="
-          kubectl exec -n mooring-system "$pod" -c mooring -- ls -la /sys/fs/bpf/mooring/ 2>&1 || echo "bpffs not accessible"
-        done
-
-  e2e-domestic1-diag:
-    desc: Check all three revNAT stage-1 map conditions on every mooring pod
-    cmds:
-      - |
-        SRC=192.168.10.100
-        DST=192.168.10.0
-        PORT=1000
-        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
-          NODE=$(kubectl get -n mooring-system "$pod" -o jsonpath='{.spec.nodeName}')
-          echo "=== $pod (node=$NODE) ==="
-          kubectl exec -n mooring-system "$pod" -c mooring -- \
-            moorctl diag stage1 --src-ip $SRC --dst-ip $DST --dst-port $PORT
-        done
-
-  worker2-trace:
-    desc: Stream BPF trace_pipe from kind-with-bgp-worker2 for 15 s (run in parallel with e2e-domestic1-test)
-    cmds:
-      - |
-        sudo docker exec kind-with-bgp-worker2 sh -c '
-          echo 1 > /sys/kernel/debug/tracing/tracing_on
-          timeout 15 cat /sys/kernel/debug/tracing/trace_pipe || true
-        '
-
-  worker-trace:
-    desc: Stream BPF trace_pipe from kind-with-bgp-worker for 15 s (run in parallel with e2e-domestic1-test)
-    cmds:
-      - |
-        sudo docker exec kind-with-bgp-worker sh -c '
-          echo 1 > /sys/kernel/debug/tracing/tracing_on
-          timeout 15 cat /sys/kernel/debug/tracing/trace_pipe || true
-        '
-
-  worker2-route:
-    desc: Show kernel route for the domestic1-client pod IP on worker2
-    cmds:
-      - |
-        POD_IP=$(kubectl get pod -n default -l app=domestic1-client -o jsonpath='{.items[0].status.podIP}')
-        echo "routing for pod_ip=$POD_IP on worker2:"
-        POD=$(kubectl get pod -n mooring-system -o name --field-selector spec.nodeName=kind-with-bgp-worker2 | head -1)
-        kubectl exec -n mooring-system "$POD" -c mooring -- ip route get "$POD_IP"
-      - |
-        echo "--- node IP addresses ---"
-        kubectl get nodes -o wide
-
-  node-ifindex:
-    desc: Print node0 ifindex on every mooring pod so bpf_printk ifindex= values can be correlated to nodes
-    cmds:
-      - |
-        kubectl get pods -n mooring-system -l app=mooring -o name | while read pod; do
-          NODE=$(kubectl get -n mooring-system "$pod" -o jsonpath='{.spec.nodeName}')
-          IDX=$(kubectl exec -n mooring-system "$pod" -c mooring -- cat /sys/class/net/node0/ifindex 2>/dev/null || echo "N/A")
-          echo "node=$NODE  node0 ifindex=$IDX"
-        done
-
-  router0-route:
-    desc: Check if router0 has a route to the domestic1-client pod IP (verifies post-stage1 packet can reach worker)
-    cmds:
-      - |
-        POD_IP=$(kubectl get pod -n default -l app=domestic1-client -o jsonpath='{.items[0].status.podIP}')
-        echo "router0 route for pod_ip=$POD_IP:"
-        sudo docker exec clab-kind-with-bgp-router0 ip route get "$POD_IP" 2>&1 || \
-          sudo docker exec router0 ip route get "$POD_IP" 2>&1 || \
-          echo "could not reach router0 container"
 
   apply-sample-resources:
     desc: Apply sample resources
@@ -424,19 +216,6 @@ tasks:
     desc: Checkout Coil
     cmds:
       - cd {{.COIL_DIR}}; git checkout v{{.COIL_VERSION}}
-
-  clone-cilium:
-    desc: Clone Cilium
-    cmds:
-      - mkdir -p {{.CILIUM_DIR}}
-      - git clone --depth 1 --branch v$(echo {{.CILIUM_VERSION}} | cut -d \. -f 1,2,3) {{.CILIUM_REPO}} {{.CILIUM_DIR}}
-    status:
-      - test -d "{{.CILIUM_DIR}}/.git"
-
-  checkout-cilium:
-    desc: Checkout Cilium
-    cmds:
-      - cd {{.CILIUM_DIR}}; git checkout v$(echo {{.CILIUM_VERSION}} | cut -d \. -f 1,2,3)
 
   build-bird-container:
     desc: Build Bird container
@@ -458,10 +237,6 @@ tasks:
         sh: yq '.[] | select(.name == "worker2") | .ip' network/nodes.yaml
       WORKER2_GW:
         sh: yq '.[] | select(.name == "worker2") | .gw' network/nodes.yaml
-      WORKER3_IP:
-        sh: yq '.[] | select(.name == "worker3") | .ip' network/nodes.yaml
-      WORKER3_GW:
-        sh: yq '.[] | select(.name == "worker3") | .gw' network/nodes.yaml
     cmds:
       - >
         sed
@@ -472,8 +247,6 @@ tasks:
         -e "s|__WORKER_GW__|{{.WORKER_GW}}|g"
         -e "s|__WORKER2_IP__|{{.WORKER2_IP}}|g"
         -e "s|__WORKER2_GW__|{{.WORKER2_GW}}|g"
-        -e "s|__WORKER3_IP__|{{.WORKER3_IP}}|g"
-        -e "s|__WORKER3_GW__|{{.WORKER3_GW}}|g"
         -e "s|__K8S_VERSION__|{{.K8S_VERSION}}|g"
         network/cluster.clab.yaml.tmpl > network/cluster.clab.yaml
 
