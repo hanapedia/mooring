@@ -17,6 +17,7 @@ import (
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/controller/daemon"
+	"github.com/hanapedia/mooring/internal/routing"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -107,7 +108,7 @@ var _ = BeforeSuite(func() {
 		NodeName: testNodeName,
 	}).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), mockTargetCIDR, mockExtIPPool).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), mockTargetCIDR, mockExtIPPool, routing.NoopAdvertiser{}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockSnatConfig).SetupWithManager(mgr)).To(Succeed())
 

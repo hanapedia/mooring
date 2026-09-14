@@ -6,6 +6,7 @@ import (
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/controller/daemon"
 	"github.com/hanapedia/mooring/internal/loader"
+	"github.com/hanapedia/mooring/internal/routing/bgp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	apimruntime "k8s.io/apimachinery/pkg/runtime"
@@ -42,7 +43,14 @@ func main() {
 		iface = "eth0"
 	}
 
-	if err := loader.EnsureLoaded(iface); err != nil {
+	bgpCfg, err := bgp.FromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid BGP configuration")
+		os.Exit(1)
+	}
+	speaker := bgp.New(bgpCfg)
+
+	if err = loader.EnsureLoaded(iface); err != nil {
 		setupLog.Error(err, "unable to load BPF programs")
 		os.Exit(1)
 	}
@@ -84,7 +92,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := daemon.NewNATConfigReconciler(mgr.GetClient(), daemon.RealTargetCIDRMap{}, daemon.RealExtIPPoolMap{}).SetupWithManager(mgr); err != nil {
+	if err = mgr.Add(speaker); err != nil {
+		setupLog.Error(err, "unable to register BGP speaker")
+		os.Exit(1)
+	}
+
+	if err = daemon.NewNATConfigReconciler(mgr.GetClient(), daemon.RealTargetCIDRMap{}, daemon.RealExtIPPoolMap{}, speaker).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATConfig controller")
 		os.Exit(1)
 	}

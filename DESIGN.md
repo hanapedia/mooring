@@ -16,6 +16,10 @@ identity from any individual pod or node.
 
 - **BGP underlay**: pod CIDRs are advertised via BGP, making pod IPs natively routable across the
   cluster without encapsulation.
+- **Sidecar BGP daemon**: each node runs an external BGP daemon (e.g. FRR, BIRD) as a sidecar or
+  node-level DaemonSet pod that is already part of the DC BGP fabric. The mooring daemon peers with
+  it over localhost. The sidecar must accept the mooring peer as a passive neighbor (mooring
+  initiates the TCP connection).
 - **Veth-based pod networking**: the CNI creates a veth pair per pod, with the host-side end
   visible in the root network namespace. This is true of virtually all CNI plugins.
 - **Cilium CNI** with **BPF host routing** and the **CiliumDatapathPlugin** API are required only
@@ -500,7 +504,7 @@ whose pod is absent — covering pods that were deleted while the daemon was dow
 #### NATConfig controller
 
 Watches: NATConfig (cluster-scoped). Manages the `target_cidrs` and `ext_ip_pool` LPM BPF maps
-on all nodes.
+on all nodes, and drives BGP route advertisement via the `RouteAdvertiser` interface.
 
 Maintains in-memory per-NATConfig tracking of which CIDRs it has written to each map. On any
 NATConfig event:
@@ -509,6 +513,13 @@ NATConfig event:
 - Adds new entries; removes dropped entries only if no other NATConfig still references the same
   CIDR (reference-counted across all NATConfigs).
 - Updates the per-NATConfig tracking.
+- Applies the same diff to the `RouteAdvertiser`: calls `AdvertisePrefix` for newly added pool
+  CIDRs and `WithdrawPrefix` for dropped CIDRs that are no longer referenced by any NATConfig.
+
+All nodes advertise all pool CIDRs regardless of whether any pod is scheduled on the node. This
+keeps routes stable during daemon restarts — remaining nodes keep the prefixes reachable so
+stage 1 revNAT continues to work cluster-wide. On daemon restart the in-memory tracking is empty,
+so the first reconcile of each NATConfig re-advertises its entire pool (idempotent).
 
 NPRR lifecycle is owned entirely by the Pod controller (NATConfig changes fan out to all local
 pods via `EnqueueRequestsFromMapFunc`). The NATConfig controller has no field index on
@@ -553,9 +564,30 @@ therefore always means "this daemon never synced the NPR" and requires no BPF ac
 
 #### BGP speaker
 
-A BGP speaker that advertises all external IPs from all NATConfigs as /32 routes via ECMP is
-planned. It is driven by a NATConfig watch and implemented as an embedded gobgp server. This
-component is deferred and not yet implemented.
+Each daemon pod embeds a GoBGP server (`internal/routing/bgp`) that runs as an active BGP client.
+It is registered with the controller-runtime manager as a `Runnable` so its lifecycle is managed
+alongside the controllers.
+
+**Active client mode**: GoBGP is started with `ListenPort: -1` (never binds to a socket). It
+actively initiates the TCP session to the sidecar BGP daemon at `BGP_PEER_ADDR` (default
+`127.0.0.1:179`). The sidecar must be configured with the mooring peer as `passive`.
+
+**Configuration** is provided via environment variables:
+
+| Env var | Required | Default | Description |
+|---|---|---|---|
+| `BGP_LOCAL_ASN` | yes | — | Mooring daemon's AS number |
+| `BGP_REMOTE_ASN` | yes | — | Sidecar BGP daemon's AS number |
+| `BGP_ROUTER_ID` | yes | — | Node IP used as the BGP router ID |
+| `BGP_PEER_ADDR` | no | `127.0.0.1` | Sidecar BGP daemon address |
+| `BGP_NEXT_HOP` | no | `BGP_ROUTER_ID` | Next-hop attribute for advertised routes |
+
+**`RouteAdvertiser` interface**: the BGP speaker is injected into the NATConfig controller via a
+`routing.RouteAdvertiser` interface (`internal/routing`), which exposes only
+`AdvertisePrefix(ctx, *net.IPNet)` and `WithdrawPrefix(ctx, *net.IPNet)`. This keeps the
+controller independent of BGP and allows alternative implementations (L2 advertisement, kernel FIB
+sync via netlink) to be substituted without changing controller logic. A `NoopAdvertiser` is
+provided for unit tests and envtest.
 
 ---
 
@@ -617,7 +649,8 @@ cleanup via the grace period mechanism.
   high connection churn should use a dedicated NATConfig with a larger `portRangeSize` or finer
   target CIDR splits.
 - **Requires BGP underlay** with pod CIDRs advertised (native routing). Overlay networks are not
-  supported.
+  supported. Each node must also run a sidecar BGP daemon (FRR, BIRD, etc.) configured to accept
+  the mooring peer as a passive neighbor and redistribute its routes to the DC fabric.
 - **Cilium mode requires** Cilium with BPF host routing and the CiliumDatapathPlugin API. It is
   tested as a secondary target and may have ordering dependencies with other TC programs on the
   uplink interface.
