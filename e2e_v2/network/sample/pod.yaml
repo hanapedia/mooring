@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: domestic1-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: domestic1-client
+  template:
+    metadata:
+      labels:
+        app: domestic1-client
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: kind-with-bgp-worker
+      securityContext:
+        runAsUser: 10000
+        runAsGroup: 10000
+      containers:
+      - name: ubuntu
+        image: ghcr.io/cybozu/ubuntu-debug:24.04
+        imagePullPolicy: IfNotPresent
+        command:
+        - sleep
+        - infinity

@@ -1,0 +1,23 @@
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: coil-config
+      namespace: kube-system
+    data:
+      cni_netconf: |
+        {
+          "cniVersion": "0.4.0",
+          "name": "generic-veth",
+          "plugins": [
+            {
+              "type": "coil",
+              "socket": "/run/coild.sock"
+            },
+            {
+              "type": "portmap",
+              "capabilities": {
+                "portMappings": true
+              }
+            }
+          ]
+        }
