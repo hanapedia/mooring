@@ -88,4 +88,70 @@ var _ = Describe("NATConfig controller", func() {
 			eventually(func() bool { return mockExtIPPool.hasRemoved(oldExtCIDR) })
 		})
 	})
+
+	Describe("route advertisement", func() {
+		It("advertises pool CIDRs on NATConfig creation", func() {
+			extCIDR := "203.0.115.0/30"
+			nc := makeNATConfig(uniqueName("nc"), []string{"10.30.0.0/24"}, []string{extCIDR},
+				metav1.LabelSelector{})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(extCIDR) })
+		})
+
+		It("withdraws pool CIDRs on NATConfig deletion", func() {
+			extCIDR := "203.0.115.4/30"
+			nc := makeNATConfig(uniqueName("nc"), []string{"10.31.0.0/24"}, []string{extCIDR},
+				metav1.LabelSelector{})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(extCIDR) })
+
+			Expect(k8sClient.Delete(ctx, nc)).To(Succeed())
+
+			eventually(func() bool { return mockRouteAdvertiser.hasWithdrawn(extCIDR) })
+		})
+
+		It("does not withdraw a CIDR while another NATConfig still references it", func() {
+			sharedCIDR := "203.0.115.8/30"
+			sentinelCIDR := "203.0.115.12/30" // unique to nc1; withdrawal proves nc1 was reconciled
+
+			nc1 := makeNATConfig(uniqueName("nc"), []string{"10.32.0.0/24"}, []string{sharedCIDR, sentinelCIDR},
+				metav1.LabelSelector{})
+			nc2 := makeNATConfig(uniqueName("nc"), []string{"10.32.1.0/24"}, []string{sharedCIDR},
+				metav1.LabelSelector{})
+			Expect(k8sClient.Create(ctx, nc1)).To(Succeed())
+			Expect(k8sClient.Create(ctx, nc2)).To(Succeed())
+
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(sharedCIDR) })
+
+			Expect(k8sClient.Delete(ctx, nc1)).To(Succeed())
+			eventually(func() bool { return mockRouteAdvertiser.hasWithdrawn(sentinelCIDR) })
+
+			Expect(mockRouteAdvertiser.hasWithdrawn(sharedCIDR)).To(BeFalse())
+
+			Expect(k8sClient.Delete(ctx, nc2)).To(Succeed())
+			eventually(func() bool { return mockRouteAdvertiser.hasWithdrawn(sharedCIDR) })
+		})
+
+		It("advertises new CIDRs and withdraws old ones when externalIPPool changes", func() {
+			oldCIDR := "203.0.115.16/30"
+			newCIDR := "203.0.115.20/30"
+			nc := makeNATConfig(uniqueName("nc"), []string{"10.33.0.0/24"}, []string{oldCIDR},
+				metav1.LabelSelector{})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(oldCIDR) })
+
+			Eventually(func() error {
+				var current v1alpha1.NATConfig
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: nc.Name}, &current); err != nil {
+					return err
+				}
+				current.Spec.ExternalIPPool = []string{newCIDR}
+				return k8sClient.Update(ctx, &current)
+			}, "5s", "100ms").Should(Succeed())
+
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(newCIDR) })
+			eventually(func() bool { return mockRouteAdvertiser.hasWithdrawn(oldCIDR) })
+		})
+	})
 })

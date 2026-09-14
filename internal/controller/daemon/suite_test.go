@@ -17,7 +17,6 @@ import (
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/controller/daemon"
-	"github.com/hanapedia/mooring/internal/routing"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -35,16 +34,17 @@ import (
 const testNodeName = "test-node"
 
 var (
-	testEnv             *envtest.Environment
-	k8sClient           client.Client
-	scheme              = apimruntime.NewScheme()
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	counter             atomic.Int64
-	mockTargetCIDR      *recordingTargetCIDRMap
-	mockExtIPPool       *recordingExtIPPoolMap
-	mockPortRangeLookup *recordingPortRangeLookupMap
-	mockSnatConfig      *recordingSnatConfigMap
+	testEnv              *envtest.Environment
+	k8sClient            client.Client
+	scheme               = apimruntime.NewScheme()
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	counter              atomic.Int64
+	mockTargetCIDR       *recordingTargetCIDRMap
+	mockExtIPPool        *recordingExtIPPoolMap
+	mockPortRangeLookup  *recordingPortRangeLookupMap
+	mockSnatConfig       *recordingSnatConfigMap
+	mockRouteAdvertiser  *recordingRouteAdvertiser
 )
 
 func TestControllers(t *testing.T) {
@@ -79,6 +79,7 @@ var _ = BeforeSuite(func() {
 	mockExtIPPool = &recordingExtIPPoolMap{}
 	mockPortRangeLookup = &recordingPortRangeLookupMap{}
 	mockSnatConfig = &recordingSnatConfigMap{}
+	mockRouteAdvertiser = &recordingRouteAdvertiser{}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -108,7 +109,7 @@ var _ = BeforeSuite(func() {
 		NodeName: testNodeName,
 	}).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), mockTargetCIDR, mockExtIPPool, routing.NoopAdvertiser{}).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), mockTargetCIDR, mockExtIPPool, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
 
 	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockSnatConfig).SetupWithManager(mgr)).To(Succeed())
 
@@ -340,4 +341,36 @@ func (m *recordingSnatConfigMap) hasRemoved(podIP string) bool {
 		}
 	}
 	return false
+}
+
+type recordingRouteAdvertiser struct {
+	mu        sync.Mutex
+	advertised []string
+	withdrawn  []string
+}
+
+func (r *recordingRouteAdvertiser) AdvertisePrefix(_ context.Context, prefix *net.IPNet) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.advertised = append(r.advertised, prefix.String())
+	return nil
+}
+
+func (r *recordingRouteAdvertiser) WithdrawPrefix(_ context.Context, prefix *net.IPNet) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.withdrawn = append(r.withdrawn, prefix.String())
+	return nil
+}
+
+func (r *recordingRouteAdvertiser) hasAdvertised(cidr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Contains(r.advertised, cidr)
+}
+
+func (r *recordingRouteAdvertiser) hasWithdrawn(cidr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Contains(r.withdrawn, cidr)
 }
