@@ -1,0 +1,13 @@
+# https://taskfile.dev
+version: '3'
+
+tasks:
+  install:
+    desc: Install Cilium CNI
+    cmds:
+      - echo "Cilium installation not yet implemented"
+
+  wait:
+    desc: Wait for Cilium to become ready
+    cmds:
+      - echo "Cilium wait not yet implemented"

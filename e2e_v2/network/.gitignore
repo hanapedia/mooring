@@ -1,5 +1,3 @@
 cluster.clab.yaml
 .cluster.clab.yaml.bak
 clab-kind-with-bgp
-coil/coil-config.yaml
-coil/upstream.yaml
