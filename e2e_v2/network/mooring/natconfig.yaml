@@ -11,3 +11,6 @@ spec:
   podSelector:
     matchLabels:
       app: domestic1-client
+  nodeSelector:
+    matchLabels:
+      mooring.hanapeida.link/advertise: "true"

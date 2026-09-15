@@ -136,18 +136,20 @@ tasks:
 
   # ── domestic1 e2e ─────────────────────────────────────────────────────────────
   e2e-domestic1-test:
-    desc: Curl domestic1 server (192.168.10.100:8000) from domestic1-client pod
+    desc: Curl domestic1 server (192.168.10.100:8000) from all domestic1-client pods
     cmds:
       - |
-        POD=$(kubectl get pod -n default -l app=domestic1-client -o name | head -1)
-        kubectl exec -n default "${POD}" -- curl -s --max-time 10 192.168.10.100:8000
-        kubectl exec -n default "${POD}" -- ping -c 3 192.168.10.100
+        kubectl get pod -n default -l app=domestic1-client -o name | while read pod; do
+          echo "=== $pod ==="
+          kubectl exec -n default "${pod}" -- curl -s --max-time 10 -w "\n" 192.168.10.100:8000
+          kubectl exec -n default "${pod}" -- ping -c 3 192.168.10.100
+        done
 
   apply-sample-resources:
     desc: Apply sample resources
     cmds:
       - kubectl apply -k network/sample/
-      - kubectl wait deployment --all -n default --for condition=Available --timeout 300s
+      - kubectl wait pod -l app=domestic1-client -n default --for condition=Ready --timeout 300s
 
   build-bird-container:
     desc: Build Bird container
