@@ -15,7 +15,7 @@ mooring eliminates this by moving SNAT to the client pod's own node and decoupli
 - **Shared external IPs**: all nodes advertise every external IP via BGP (ECMP), so any node can handle return traffic.
 - **Rollout-resilient**: BPF programs and maps are pinned to bpffs; in-flight connections survive daemon restarts.
 - **No NAT table collisions**: port ranges are allocated per `(pod, external IP)` pair, making them non-overlapping by construction.
-- **CNI-agnostic by default**: works with any veth-based CNI; Cilium is an optional integration.
+- **CNI-agnostic**: works with any veth-based CNI; Cilium compatibility is tested (see [Cilium compatibility](docs/cilium-compatibility.md)).
 
 ## How It Works
 
@@ -125,4 +125,4 @@ spec:
 
 - **Max concurrent connections**: for a given external IP, the number of concurrent connections a pod can open to the same destination `(IP, port)` is bounded by its assigned port range (`portRangeSize × portRangeCount`). Pods expecting a high number of concurrent connections should request a higher `portRangeCount`.
 - **BGP underlay with native pod routing is required.** Overlay networks are not supported. Other routing methods may be supported in the future.
-- **BPF attachment ordering**: mooring attaches TC programs to the node uplink. Other solutions that also attach eBPF programs to the same interface (e.g. Cilium) may have ordering dependencies that need to be accounted for.
+- **BPF attachment ordering**: mooring attaches its programs at TCX head on the node uplink, so they run before any tail-attached programs on the same interface. Other CNIs that attach eBPF programs (e.g. Cilium) must support TCX chaining.
