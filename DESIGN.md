@@ -64,8 +64,8 @@ management is required.
 
 | Hook | Interface | Direction | Role |
 |---|---|---|---|
-| TC egress | node uplink | egress | Outbound SNAT |
-| TC ingress | node uplink | ingress | Combined stage 1 + 2 revNAT |
+| TCX egress (head) | node uplink | egress | Outbound SNAT |
+| TCX ingress (head) | node uplink | ingress | Combined stage 1 + 2 revNAT |
 
 The egress program matches outbound packets by looking up the source pod IP in the SNAT config
 map. The ingress program handles both revNAT stages in a single pass:
@@ -82,7 +82,7 @@ would see the rewritten SYN-ACK as a new, untracked connection and mark it INVAL
 `KUBE-FORWARD`'s `ctstate INVALID -j DROP` rule to drop the packet before it can be forwarded.
 
 Instead of iptables NOTRACK rules, the stage 1 not-local path returns
-`bpf_redirect_neigh(skb->ifindex, NULL, 0, 0)` rather than `TC_ACT_OK`. This sends the packet
+`bpf_redirect_neigh(skb->ifindex, NULL, 0, 0)` rather than `TCX_NEXT`. This sends the packet
 directly through the kernel's FIB + neighbor subsystem, bypassing netfilter entirely. The correct
 L2 dst MAC is resolved automatically; no iptables rules are installed. mooring's own BPF maps are
 the authoritative connection state.
@@ -95,9 +95,9 @@ scope of packet inspection to client pods only, at the cost of per-pod TC attach
 
 | Hook | Interface | Direction | Role |
 |---|---|---|---|
-| TC egress | host-side veth | egress | Outbound SNAT (client pods only) |
-| TC ingress | node uplink | ingress | Stage 1: IP revNAT |
-| TC ingress | host-side veth | ingress | Stage 2: port revNAT (client pods only) |
+| TCX egress (head) | host-side veth | egress | Outbound SNAT (client pods only) |
+| TCX ingress (head) | node uplink | ingress | Stage 1: IP revNAT |
+| TCX ingress (head) | host-side veth | ingress | Stage 2: port revNAT (client pods only) |
 
 ### Cilium integration (optional feature)
 
@@ -334,7 +334,7 @@ The hook names below use the default (CNI-agnostic) TC attachment. See
 client pod
   │  src=pod-IP:pod-port, dst=server-IP:server-port
   ▼
-TC egress — node uplink  (all nodes; filtered by target_cidrs LPM lookup)
+TCX egress (head) — node uplink  (all nodes; filtered by target_cidrs LPM lookup)
   │  looks up dst in target_cidrs LPM → matched CIDR {cidr-addr, cidr-prefixlen} (or miss → pass)
   │  looks up (pod-IP, cidr-addr, cidr-prefixlen) in snat_config → selects externalIP + allocates NAT-port
   │  writes NAT table: {pod-IP, NAT-port, server-IP, server-port} → {pod-port}
@@ -347,7 +347,7 @@ external server  (sees src=externalIP:NAT-port)
 
 ### Return path — Combined revNAT (node uplink)
 
-A single TC ingress program on the node uplink handles both stages.
+A single TCX ingress program on the node uplink handles both stages.
 
 ```
 external server
@@ -355,7 +355,7 @@ external server
   ▼
 Any node (BGP ECMP)
   ▼
-TC ingress — node uplink  (combined stage 1+2 revNAT, all nodes)
+TCX ingress (head) — node uplink  (combined stage 1+2 revNAT, all nodes)
   │  checks src-IP against target_cidrs
   │
   │  [case A] dst ∈ external IP pool  → Stage 1
@@ -659,12 +659,13 @@ cleanup via the grace period mechanism.
 
 ## Open Questions
 
-- **TC program coexistence on the uplink**: if other tools (e.g. bandwidth shaping, observability)
-  also attach TC programs to the node uplink, ordering and priority need to be defined. The
-  default mode must document expected TC chain position.
-
 ### Resolved
 
+- **TCX chain position and Cilium coexistence**: programs attach at the head of the TCX list
+  (`link.Head()`), return `TCX_NEXT` on non-matching packets, and use `SEC("tcx/egress")` /
+  `SEC("tcx/ingress")`. Cilium always appends at the tail of the TCX list, so head attachment
+  guarantees mooring runs first. `TCX_NEXT` passes non-matching packets to the next program in
+  the chain (including Cilium), so coexistence requires no coordination.
 - **Port selection across multiple external IPs**: fill-first — the egress program iterates
   `snat_config.allocations[0..count-1]`, uses the first entry with a free slot (its `nextPort`
   counter has not wrapped the range), and spills to the next entry only when the current one is

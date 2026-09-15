@@ -63,7 +63,7 @@ struct {
 } outbound_sessions SEC(".maps");
 
 /// entrypoint for snat_egress
-SEC("tc")
+SEC("tcx/egress")
 int snat_egress(struct __sk_buff *skb) {
   void *data = (void *)(long)skb->data;
   void *data_end = (void *)(long)skb->data_end;
@@ -71,20 +71,20 @@ int snat_egress(struct __sk_buff *skb) {
   // parse ethernet header
   struct ethhdr *eth = data;
   if ((void *)(eth + 1) > data_end)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   if (eth->h_proto != bpf_htons(ETH_P_IP))
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // parse IP header
   struct iphdr *iph = (void *)(eth + 1);
   if ((void *)(iph + 1) > data_end)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // handle only tcp, udp, and icmp
   if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP &&
       iph->protocol != IPPROTO_ICMP)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // look up dest against target cidrs; value carries the matched CIDR identity
   struct lpm_key lpm = {
@@ -93,7 +93,7 @@ int snat_egress(struct __sk_buff *skb) {
   };
   struct target_cidr_val *tcv = bpf_map_lookup_elem(&target_cidrs, &lpm);
   if (!tcv)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // look up snat config keyed by (pod_ip, matched_target_cidr) so that a pod
   // matched by multiple NATConfigs uses the correct ext-IP pool per destination
@@ -106,24 +106,24 @@ int snat_egress(struct __sk_buff *skb) {
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     pod_port = tcph->source;
     server_port = tcph->dest;
     csum_off = l4_off + offsetof(struct tcphdr, check);
   } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     pod_port = udph->source;
     server_port = udph->dest;
     csum_off = l4_off + offsetof(struct udphdr, check);
   } else { // ICMP (use port as id)
     struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(icmph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     // handle only echo for now
     if (icmph->type != ICMP_ECHO)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     pod_port = icmph->un.echo.id;
     server_port = 0;
     csum_off = l4_off + offsetof(struct icmphdr, checksum);
@@ -153,7 +153,7 @@ int snat_egress(struct __sk_buff *skb) {
     };
     struct snat_config_val *cv = bpf_map_lookup_elem(&snat_config, &sc_key);
     if (!cv || cv->count == 0) // no snat config found
-      return TC_ACT_OK;
+      return TCX_NEXT;
 
     for (__u32 i = 0; i < MAX_SNAT_ALLOCS; i++) {
       if (i >= cv->count)
@@ -172,7 +172,7 @@ int snat_egress(struct __sk_buff *skb) {
     }
 
     if (!ext_ip)
-      return TC_ACT_OK; // all entries exhausted
+      return TCX_NEXT; // all entries exhausted
 
     struct session_val new_sv = {.ext_ip = ext_ip, .nat_port = nat_port};
     bpf_map_update_elem(&outbound_sessions, &sk, &new_sv, BPF_ANY);
@@ -200,17 +200,17 @@ int snat_egress(struct __sk_buff *skb) {
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     tcph->source = nat_port;
   } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     udph->source = nat_port;
   } else { // ICMP (uses port as id)
     struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(icmph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     icmph->un.echo.id = nat_port;
   }
 
@@ -227,5 +227,5 @@ int snat_egress(struct __sk_buff *skb) {
     bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
   }
 
-  return TC_ACT_OK;
+  return TCX_NEXT;
 }

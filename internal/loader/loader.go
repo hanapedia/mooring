@@ -76,11 +76,13 @@ func Load(iface string) error {
 		}
 	}
 
-	// Attach and pin snat_egress → TC egress.
+	// Attach and pin snat_egress → TC egress at head of TCX list so our
+	// rewrite runs before Cilium (which attaches at tail).
 	egressLink, err := link.AttachTCX(link.TCXOptions{
 		Interface: netIface.Index,
 		Program:   snatObjs.SnatEgress,
 		Attach:    ebpf.AttachTCXEgress,
+		Anchor:    link.Head(),
 	})
 	if err != nil {
 		return fmt.Errorf("attach snat_egress: %w", err)
@@ -91,11 +93,12 @@ func Load(iface string) error {
 	}
 	_ = egressLink.Close()
 
-	// Attach and pin revnat_ingress → TC ingress.
+	// Attach and pin revnat_ingress → TC ingress at head of TCX list.
 	ingressLink, err := link.AttachTCX(link.TCXOptions{
 		Interface: netIface.Index,
 		Program:   revnatObjs.RevnatIngress,
 		Attach:    ebpf.AttachTCXIngress,
+		Anchor:    link.Head(),
 	})
 	if err != nil {
 		return fmt.Errorf("attach revnat_ingress: %w", err)
