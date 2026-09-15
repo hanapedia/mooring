@@ -4,7 +4,7 @@ metadata:
   name: domestic1
 spec:
   externalIPPool:
-    - 192.168.10.0/32
+    - 10.70.0.1/32
   portRangeSize: 100
   targetCIDRs:
     - 192.168.10.0/24
