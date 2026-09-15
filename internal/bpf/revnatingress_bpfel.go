@@ -117,8 +117,7 @@ type RevnatIngressMapSpecs struct {
 // RevnatIngressVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type RevnatIngressVariableSpecs struct {
-}
+type RevnatIngressVariableSpecs struct{}
 
 // RevnatIngressObjects contains all objects after they have been loaded into the kernel.
 //
@@ -168,8 +167,7 @@ func (m *RevnatIngressMaps) Close() error {
 // RevnatIngressVariables contains all global variables after they have been loaded into the kernel.
 //
 // It can be passed to LoadRevnatIngressObjects or ebpf.CollectionSpec.LoadAndAssign.
-type RevnatIngressVariables struct {
-}
+type RevnatIngressVariables struct{}
 
 // RevnatIngressPrograms contains all programs after they have been loaded into the kernel.
 //

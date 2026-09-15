@@ -1,0 +1,118 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  COIL_VERSION: '{{.COIL_VERSION | default "2.15.0"}}'
+  COIL_TAG: '{{.COIL_TAG | default "2.15.0"}}'
+  COIL_REPO: '{{.COIL_REPO | default "https://github.com/cybozu-go/coil.git"}}'
+  COIL_REPO_DIR: 'worktrees/coil.git'
+  COIL_DIR: 'worktrees/v{{.COIL_VERSION}}'
+  COIL_IMAGE: '{{.COIL_IMAGE | default "ghcr.io/cybozu-go/coil"}}'
+
+tasks:
+  install:
+    desc: Generate manifests, install Coil CNI, and wait for readiness
+    cmds:
+      - task: generate-upstream-manifests
+      - task: load-image
+      - task: apply
+      - task: wait
+
+  load-image:
+    desc: Pull and load Coil image into kind
+    cmds:
+      - task: docker-pull
+        vars: { IMAGE_NAME: "{{.COIL_IMAGE}}:{{.COIL_TAG}}" }
+      - kind load docker-image {{.COIL_IMAGE}}:{{.COIL_TAG}} --name kind-with-bgp
+
+  apply:
+    desc: Apply Coil manifests to the cluster
+    vars:
+      COIL_CONFIG_NAME:
+        sh: yq 'select(.kind=="ConfigMap") |.metadata.name' upstream.yaml
+    cmds:
+      - yq '.metadata.name = "{{.COIL_CONFIG_NAME}}"' coil-config.tmpl.yaml > coil-config.yaml
+      - kustomize build --load-restrictor=LoadRestrictionsNone . | kubectl apply -f -
+
+  wait:
+    desc: Wait for Coil to become ready and apply address pool
+    cmds:
+      - kubectl wait -n kube-system --for=condition=available --timeout=300s deployment/coil-ipam-controller
+      - kubectl wait -n kube-system --for=condition=available --timeout=300s deployment/coil-egress-controller
+      - kubectl wait -n kube-system --for=condition=ready --timeout=300s pod --selector=app.kubernetes.io/name=coil
+      - kubectl apply -f address_pool.yaml
+
+  generate-upstream-manifests:
+    desc: Generate Coil upstream manifests from source
+    cmds:
+      - task: init-repo
+      - task: add-worktree
+      - task: generate-certificates
+      - kustomize build --load-restrictor=LoadRestrictionsNone {{.COIL_DIR}}/v2 > upstream.yaml
+      - task: patch-image
+
+  patch-image:
+    desc: Patch Coil images in upstream manifests
+    cmds:
+      - |
+        yq -i '
+          (select(.kind == "DaemonSet" and .metadata.name == "coild")
+          .spec.template.spec.containers[]
+          | select(.name == "coild")
+          .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
+          ' upstream.yaml
+      - |
+        yq -i '
+          (select(.kind == "Deployment" and .metadata.name == "coil-ipam-controller")
+          .spec.template.spec.containers[]
+          | select(.name == "coil-ipam-controller")
+          .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
+          ' upstream.yaml
+      - |
+        yq -i '
+          (select(.kind == "Deployment" and .metadata.name == "coil-egress-controller")
+          .spec.template.spec.containers[]
+          | select(.name == "coil-egress-controller")
+          .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
+          ' upstream.yaml
+
+  generate-certificates:
+    desc: Generate Coil webhook certificates
+    cmds:
+      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-webhook-service -host=coilv2-webhook-service.kube-system.svc -certname=cert.pem -keyname=key.pem
+      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-ipam-webhook-service -host=coilv2-ipam-webhook-service.kube-system.svc -certname=ipam-cert.pem -keyname=ipam-key.pem -ca=cert.pem -cakey=key.pem
+      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-egress-webhook-service -host=coilv2-egress-webhook-service.kube-system.svc -certname=egress-cert.pem -keyname=egress-key.pem -ca=cert.pem -cakey=key.pem
+      - |
+        CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
+        sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/ipam/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/ipam/webhook_manifests_patch.yaml
+      - |
+        CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
+        sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml
+
+  init-repo:
+    desc: Bare-clone Coil repository (once; idempotent)
+    cmds:
+      - mkdir -p worktrees
+      - git clone --bare {{.COIL_REPO}} {{.COIL_REPO_DIR}}
+    status:
+      - test -d "{{.COIL_REPO_DIR}}"
+
+  add-worktree:
+    desc: Create a git worktree for the specified version (idempotent)
+    cmds:
+      - git -C {{.COIL_REPO_DIR}} fetch --tags origin
+      - git -C {{.COIL_REPO_DIR}} worktree add ../v{{.COIL_VERSION}} v{{.COIL_VERSION}}
+    status:
+      - test -d "{{.COIL_DIR}}"
+
+  docker-pull:
+    desc: Pull a specified image if it doesn't exist locally
+    vars:
+      IMAGE_NAME: '{{.IMAGE_NAME | default "ghcr.io/cybozu/ubuntu:24.04"}}'
+    cmds:
+      - |
+        if ! docker image inspect {{.IMAGE_NAME}} &> /dev/null; then
+          docker pull --platform=linux/amd64 {{.IMAGE_NAME}}
+        else
+          echo "{{.IMAGE_NAME}} already exists locally, skip pulling."
+        fi

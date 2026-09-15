@@ -3,6 +3,7 @@ kind: Cluster
 networking:
   disableDefaultCNI: true
   serviceSubnet: 10.68.0.0/16
+  kubeProxyMode: none
 nodes:
   - role: control-plane
     kubeadmConfigPatches:

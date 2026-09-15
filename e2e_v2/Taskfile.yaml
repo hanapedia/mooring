@@ -1,6 +1,14 @@
 # https://taskfile.dev
 version: '3'
 
+includes:
+  coil:
+    taskfile: ./coil/Taskfile.yaml
+    dir: ./coil
+  cilium:
+    taskfile: ./cilium/Taskfile.yaml
+    dir: ./cilium
+
 vars:
   K8S_VERSION: '{{.K8S_VERSION | default "1.34.8"}}'
   BIRD_VERSION: '{{.BIRD_VERSION | default "3.2.2.1"}}'
@@ -13,26 +21,30 @@ vars:
   AGENT_IMAGE: '{{.AGENT_IMAGE | default "ghcr.io/hanapedia/mooring-agent"}}'
   AGENT_TAG: '{{.AGENT_TAG | default "dev"}}'
 
-  COIL_VERSION: '{{.COIL_VERSION | default "2.15.0"}}'
-  COIL_TAG: '{{.COIL_TAG | default "2.15.0" }}'
-  COIL_REPO: '{{.COIL_REPO | default "https://github.com/cybozu-go/coil.git"}}'
-  COIL_DIR: '{{.COIL_DIR | default "/tmp/coil"}}'
-  COIL_IMAGE: '{{.COIL_IMAGE | default "ghcr.io/cybozu-go/coil"}}'
-
   # debug container images
   UBUNTU_DEBUG_IMAGE: ghcr.io/cybozu/ubuntu-debug:24.04
   TESTHTTPD_IMAGE: ghcr.io/cybozu/testhttpd:0
 
 tasks:
   start:
-    desc: Start k8s on BGP network infrastructure
+    desc: Start k8s on BGP network infrastructure with Coil CNI
     cmds:
       - task: build-bird-container
       - task: start-kind-without-cni
       - task: pull-and-load-debug-images
-      - task: generate-coil-upstream-manifests
-      - task: install-coil
-      - task: wait-coil
+      - task: coil:install
+      - task: install-mooring
+      - task: apply-sample-resources
+
+  start-cilium:
+    desc: Start k8s on BGP network infrastructure with Cilium CNI
+    cmds:
+      - task: build-bird-container
+      - task: start-kind-without-cni
+        vars: { KIND_CONFIG: ../cilium/cluster.kind.yaml }
+      - task: pull-and-load-debug-images
+      - task: cilium:install
+        vars: { K8S_VERSION: "{{.K8S_VERSION}}" }
       - task: install-mooring
       - task: apply-sample-resources
 
@@ -42,10 +54,13 @@ tasks:
       - task: stop-kind-without-cni
 
   start-kind-without-cni:
-    desc: Start kind cluster without kube-proxy and CNI
+    desc: Start kind cluster without CNI
+    vars:
+      KIND_CONFIG: '{{.KIND_CONFIG | default "cluster.kind.yaml"}}'
     dir: network
     cmds:
       - task: generate-cluster-clab-yaml
+        vars: { KIND_CONFIG: "{{.KIND_CONFIG}}" }
       - sudo containerlab deploy -t cluster.clab.yaml
       - kind export kubeconfig --name kind-with-bgp
 
@@ -64,77 +79,6 @@ tasks:
       - task: docker-pull
         vars: { IMAGE_NAME: "{{.TESTHTTPD_IMAGE}}" }
       - kind load docker-image {{.TESTHTTPD_IMAGE}} --name kind-with-bgp
-
-  install-coil:
-    desc: Install Coil CNI
-    vars:
-      # Make sure `task generate-coil-upstream-manifests` is run before this task
-      COIL_CONFIG_NAME:
-        sh: yq 'select(.kind=="ConfigMap") |.metadata.name' network/coil/upstream.yaml
-    cmds:
-      - task: docker-pull
-        vars: { IMAGE_NAME: "{{.COIL_IMAGE}}:{{.COIL_TAG}}" }
-      - kind load docker-image {{.COIL_IMAGE}}:{{.COIL_TAG}} --name kind-with-bgp
-      - yq '.metadata.name = "{{.COIL_CONFIG_NAME}}"' network/coil/coil-config.tmpl.yaml > network/coil/coil-config.yaml
-      - kustomize build --load-restrictor=LoadRestrictionsNone network/coil | kubectl apply -f -
-
-  wait-coil:
-    desc: Wait for Coil to become ready
-    cmds:
-      - kubectl wait -n kube-system --for=condition=available --timeout=300s deployment/coil-ipam-controller
-      - kubectl wait -n kube-system --for=condition=available --timeout=300s deployment/coil-egress-controller
-      - kubectl wait -n kube-system --for=condition=ready --timeout=300s pod --selector=app.kubernetes.io/name=coil
-      - kubectl apply -f network/coil/address_pool.yaml
-
-  generate-coil-upstream-manifests:
-    desc: Generate Coil upstream manifests
-    cmds:
-      - task: clone-coil
-      - task: checkout-coil
-      - task: generate-coil-certificates
-      - kustomize build --load-restrictor=LoadRestrictionsNone {{.COIL_DIR}}/v2 > network/coil/upstream.yaml
-      - task: patch-coil-image
-
-  patch-coil-image:
-    desc: Patch Coil images in upstream manifests
-    cmds:
-      # Coild image
-      - |
-        yq -i '
-          (select(.kind == "DaemonSet" and .metadata.name == "coild")
-          .spec.template.spec.containers[]
-          | select(.name == "coild")
-          .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
-          ' network/coil/upstream.yaml
-      # Coil ipam controller image
-      - |
-        yq -i '
-          (select(.kind == "Deployment" and .metadata.name == "coil-ipam-controller")
-          .spec.template.spec.containers[]
-          | select(.name == "coil-ipam-controller")
-          .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
-          ' network/coil/upstream.yaml
-      # Coil egress controller image
-      - |
-        yq -i '
-          (select(.kind == "Deployment" and .metadata.name == "coil-egress-controller")
-          .spec.template.spec.containers[]
-          | select(.name == "coil-egress-controller")
-          .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
-          ' network/coil/upstream.yaml
-
-  generate-coil-certificates:
-    desc: Generate Coil certificates
-    cmds:
-      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-webhook-service -host=coilv2-webhook-service.kube-system.svc -certname=cert.pem -keyname=key.pem
-      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-ipam-webhook-service -host=coilv2-ipam-webhook-service.kube-system.svc -certname=ipam-cert.pem -keyname=ipam-key.pem -ca=cert.pem -cakey=key.pem
-      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-egress-webhook-service -host=coilv2-egress-webhook-service.kube-system.svc -certname=egress-cert.pem -keyname=egress-key.pem -ca=cert.pem -cakey=key.pem
-      - |
-        CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
-        sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/ipam/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/ipam/webhook_manifests_patch.yaml
-      - |
-        CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
-        sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml
 
   install-mooring-crds:
     desc: Apply mooring CRDs to the cluster
@@ -165,6 +109,7 @@ tasks:
         ' ../manifests/agent.yaml | kubectl apply -f -
       - kubectl wait -n mooring-system --for=condition=available --timeout=300s deployment/mooring-operator
       - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring-agent
+      - kubectl apply -f network/mooring/natconfig.yaml
 
   build-operator-image:
     desc: Build the mooring operator container image
@@ -204,19 +149,6 @@ tasks:
       - kubectl apply -k network/sample/
       - kubectl wait deployment --all -n default --for condition=Available --timeout 300s
 
-  clone-coil:
-    desc: Clone Coil
-    cmds:
-      - mkdir -p {{.COIL_DIR}}
-      - git clone --depth 1 --branch v{{.COIL_VERSION}} {{.COIL_REPO}} {{.COIL_DIR}}
-    status:
-      - test -d "{{.COIL_DIR}}/.git"
-
-  checkout-coil:
-    desc: Checkout Coil
-    cmds:
-      - cd {{.COIL_DIR}}; git checkout v{{.COIL_VERSION}}
-
   build-bird-container:
     desc: Build Bird container
     cmds:
@@ -225,6 +157,7 @@ tasks:
   generate-cluster-clab-yaml:
     desc: Generate cluster.clab.yaml
     vars:
+      KIND_CONFIG: '{{.KIND_CONFIG | default "cluster.kind.yaml"}}'
       CONTROL_PLANE_IP:
         sh: yq '.[] | select(.name == "control-plane") | .ip' network/nodes.yaml
       CONTROL_PLANE_GW:
@@ -241,6 +174,7 @@ tasks:
       - >
         sed
         -e "s/BIRD_VERSION/{{.BIRD_VERSION}}/g"
+        -e "s|__KIND_CONFIG__|{{.KIND_CONFIG}}|g"
         -e "s|__CONTROL_PLANE_IP__|{{.CONTROL_PLANE_IP}}|g"
         -e "s|__CONTROL_PLANE_GW__|{{.CONTROL_PLANE_GW}}|g"
         -e "s|__WORKER_IP__|{{.WORKER_IP}}|g"
@@ -251,13 +185,13 @@ tasks:
         network/cluster.clab.yaml.tmpl > network/cluster.clab.yaml
 
   docker-pull:
-    desc: Pull a specified image if it doesn't exist in local
+    desc: Pull a specified image if it doesn't exist locally
     vars:
-      IMAGE_NAME: '{{ .IMAGE_NAME| default "ghcr.io/cybozu/ubuntu:24.04" }}'
+      IMAGE_NAME: '{{.IMAGE_NAME | default "ghcr.io/cybozu/ubuntu:24.04"}}'
     cmds:
       - |
         if ! docker image inspect {{.IMAGE_NAME}} &> /dev/null; then
           docker pull --platform=linux/amd64 {{.IMAGE_NAME}}
         else
-          echo "{{.IMAGE_NAME}} already exists in local, skip pulling."
+          echo "{{.IMAGE_NAME}} already exists locally, skip pulling."
         fi
