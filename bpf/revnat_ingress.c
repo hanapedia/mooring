@@ -57,11 +57,11 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
 
   struct ethhdr *eth = data;
   if ((void *)(eth + 1) > data_end)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   struct iphdr *iph = (void *)(eth + 1);
   if ((void *)(iph + 1) > data_end)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // look up nat_table to see if the pod is local
   struct nat_key nk = {
@@ -96,17 +96,17 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     tcph->dest = pod_port;
   } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     udph->dest = pod_port;
   } else { // ICMP (use port as id)
     struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(icmph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     icmph->un.echo.id = pod_port;
   }
 
@@ -116,7 +116,7 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
 
   bpf_l4_csum_replace(skb, csum_off, nat_port, pod_port, sizeof(__be16));
 
-  return TC_ACT_OK;
+  return TCX_NEXT;
 }
 
 /*
@@ -133,7 +133,7 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
  * Look up dest IP + port to find client pod
  * rewrite header with pod IP.
  */
-SEC("tc")
+SEC("tcx/ingress")
 int revnat_ingress(struct __sk_buff *skb) {
   void *data = (void *)(long)skb->data;
   void *data_end = (void *)(long)skb->data_end;
@@ -141,15 +141,15 @@ int revnat_ingress(struct __sk_buff *skb) {
   // parse ethernet header
   struct ethhdr *eth = data;
   if ((void *)(eth + 1) > data_end)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   if (eth->h_proto != bpf_htons(ETH_P_IP))
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // parse IP header
   struct iphdr *iph = (void *)(eth + 1);
   if ((void *)(iph + 1) > data_end)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // look up src against target_cidrs
   struct lpm_key slpm = {
@@ -157,12 +157,12 @@ int revnat_ingress(struct __sk_buff *skb) {
       .addr = iph->saddr,
   };
   if (!bpf_map_lookup_elem(&target_cidrs, &slpm))
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // handle only tcp, udp, or icmp
   if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP &&
       iph->protocol != IPPROTO_ICMP)
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // parse l4 header
   __be16 nat_port, server_port;
@@ -172,24 +172,24 @@ int revnat_ingress(struct __sk_buff *skb) {
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     nat_port = tcph->dest;
     server_port = tcph->source;
     csum_off = l4_off + offsetof(struct tcphdr, check);
   } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     nat_port = udph->dest;
     server_port = udph->source;
     csum_off = l4_off + offsetof(struct udphdr, check);
   } else { // ICMP (use port as id)
     struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(icmph + 1) > data_end)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     // handle only echo for now
     if (icmph->type != ICMP_ECHOREPLY)
-      return TC_ACT_OK;
+      return TCX_NEXT;
     nat_port = icmph->un.echo.id;
     server_port = 0;
     csum_off = l4_off + offsetof(struct icmphdr, checksum);
@@ -226,12 +226,12 @@ int revnat_ingress(struct __sk_buff *skb) {
   if (!inner) {
     bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
                bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
-    return TC_ACT_OK;
+    return TCX_NEXT;
   }
   __u32 port_idx = bpf_ntohs(nat_port);
   __be32 *pod_ip_ptr = bpf_map_lookup_elem(inner, &port_idx);
   if (!pod_ip_ptr || !*pod_ip_ptr) // check if the value is zero
-    return TC_ACT_OK;
+    return TCX_NEXT;
 
   // rewrite dst IP before csum helpers (which invalidate PTR_TO_PACKET regs)
   __be32 pod_ip = *pod_ip_ptr;
