@@ -50,6 +50,9 @@ func (s *BGPSpeaker) Start(ctx context.Context) error {
 				NeighborAddress: s.cfg.PeerAddr,
 				PeerAsn:         s.cfg.RemoteASN,
 			},
+			Transport: &gobgpapi.Transport{
+				LocalAddress: s.cfg.LocalAddr,
+			},
 		},
 	}); err != nil {
 		return fmt.Errorf("add bgp peer %s: %w", s.cfg.PeerAddr, err)

@@ -15,6 +15,7 @@ type BGPConfig struct {
 	RemoteASN uint32
 	RouterID  string // local node IP; used as the BGP router ID
 	PeerAddr  string // address of the sidecar BGP daemon; default 127.0.0.1
+	LocalAddr string // source address for outbound BGP connections; default 127.0.0.1
 	NextHop   string // next-hop attribute for advertised routes; default RouterID
 }
 
@@ -38,6 +39,10 @@ func FromEnv() (BGPConfig, error) {
 	if peerAddr == "" {
 		peerAddr = "127.0.0.1"
 	}
+	localAddr := os.Getenv("BGP_LOCAL_ADDR")
+	if localAddr == "" {
+		localAddr = "127.0.0.1"
+	}
 	nextHop := os.Getenv("BGP_NEXT_HOP")
 	if nextHop == "" {
 		nextHop = routerID
@@ -48,6 +53,7 @@ func FromEnv() (BGPConfig, error) {
 		RemoteASN: remoteASN,
 		RouterID:  routerID,
 		PeerAddr:  peerAddr,
+		LocalAddr: localAddr,
 		NextHop:   nextHop,
 	}, nil
 }
