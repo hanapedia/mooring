@@ -72,10 +72,10 @@ spec:
                 type: integer
               staleSince:
                 description: |-
-                  StaleSince is set by the daemon's NPRR controller when the pod's
-                  deletion grace period expires. All daemons react by cleaning up their
-                  BPF maps. After BPFCleanupWindow has elapsed the daemon deletes the
-                  NPRR, and GC cascades to delete this NPR.
+                  StaleSince is set by the operator's NPR controller when the owning NPRR
+                  has been deleted (pod gone and grace period elapsed). All daemons react
+                  by cleaning up their BPF maps. After BPFCleanupWindow has elapsed the
+                  operator removes the allocation finalizer and deletes the NPR.
                 format: date-time
                 type: string
               targetCIDRs:

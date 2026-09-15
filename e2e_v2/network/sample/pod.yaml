@@ -1,26 +1,59 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Pod
 metadata:
-  name: domestic1-client
+  name: domestic1-client-kind-with-bgp-control-plane
+  labels:
+    app: domestic1-client
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: domestic1-client
-  template:
-    metadata:
-      labels:
-        app: domestic1-client
-    spec:
-      nodeSelector:
-        kubernetes.io/hostname: kind-with-bgp-worker
-      securityContext:
-        runAsUser: 10000
-        runAsGroup: 10000
-      containers:
-      - name: ubuntu
-        image: ghcr.io/cybozu/ubuntu-debug:24.04
-        imagePullPolicy: IfNotPresent
-        command:
-        - sleep
-        - infinity
+  nodeSelector:
+    kubernetes.io/hostname: kind-with-bgp-control-plane
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: domestic1-client-kind-with-bgp-worker
+  labels:
+    app: domestic1-client
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: kind-with-bgp-worker
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: domestic1-client-kind-with-bgp-worker2
+  labels:
+    app: domestic1-client
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: kind-with-bgp-worker2
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity

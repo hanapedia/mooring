@@ -75,6 +75,10 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
 
+	Expect(k8sClient.Create(ctx, &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: testNodeName},
+	})).To(Succeed())
+
 	mockTargetCIDR = &recordingTargetCIDRMap{}
 	mockExtIPPool = &recordingExtIPPoolMap{}
 	mockPortRangeLookup = &recordingPortRangeLookupMap{}
@@ -88,6 +92,9 @@ var _ = BeforeSuite(func() {
 		HealthProbeBindAddress: "0",
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Node{}: {
+					Field: fields.OneTermEqualSelector("metadata.name", testNodeName),
+				},
 				&corev1.Pod{}: {
 					Field: fields.OneTermEqualSelector("spec.nodeName", testNodeName),
 				},
@@ -109,7 +116,7 @@ var _ = BeforeSuite(func() {
 		NodeName: testNodeName,
 	}).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), mockTargetCIDR, mockExtIPPool, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), testNodeName, mockTargetCIDR, mockExtIPPool, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
 
 	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockSnatConfig).SetupWithManager(mgr)).To(Succeed())
 
