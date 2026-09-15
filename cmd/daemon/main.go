@@ -62,6 +62,9 @@ func main() {
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				// cache only resources local to this node
+				&corev1.Node{}: {
+					Field: fields.OneTermEqualSelector("metadata.name", nodeName),
+				},
 				&corev1.Pod{}: {
 					Field: fields.OneTermEqualSelector("spec.nodeName", nodeName),
 				},
@@ -97,7 +100,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = daemon.NewNATConfigReconciler(mgr.GetClient(), daemon.RealTargetCIDRMap{}, daemon.RealExtIPPoolMap{}, speaker).SetupWithManager(mgr); err != nil {
+	if err = daemon.NewNATConfigReconciler(mgr.GetClient(), nodeName, daemon.RealTargetCIDRMap{}, daemon.RealExtIPPoolMap{}, speaker).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATConfig controller")
 		os.Exit(1)
 	}

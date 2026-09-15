@@ -190,6 +190,9 @@ spec:
   podSelector:
     matchLabels:
       egress: prod
+  nodeSelector:           # optional; omit to advertise from all nodes
+    matchLabels:
+      node-role: nat-gateway
 ```
 
 | Field | Description |
@@ -198,6 +201,7 @@ spec:
 | `portRangeSize` | Fixed number of ports per allocation block; applies uniformly to all pods |
 | `targetCIDRs` | Destination CIDRs for which SNAT is applied |
 | `podSelector` | Selects client pods that this NATConfig applies to |
+| `nodeSelector` | Optional. Selects which nodes advertise pool CIDRs via BGP for the return path. If omitted, all nodes advertise. BPF maps are updated on all nodes regardless of this field. |
 
 ### NATPortRange
 
@@ -503,23 +507,37 @@ whose pod is absent — covering pods that were deleted while the daemon was dow
 
 #### NATConfig controller
 
-Watches: NATConfig (cluster-scoped). Manages the `target_cidrs` and `ext_ip_pool` LPM BPF maps
-on all nodes, and drives BGP route advertisement via the `RouteAdvertiser` interface.
+Watches: NATConfig (cluster-scoped) and the local Node object, cache-filtered to
+`metadata.name == NODE_NAME` via a per-object cache field selector. Manages the `target_cidrs`
+and `ext_ip_pool` LPM BPF maps on all nodes, and drives BGP route advertisement via the
+`RouteAdvertiser` interface.
 
-Maintains in-memory per-NATConfig tracking of which CIDRs it has written to each map. On any
-NATConfig event:
-- Computes new desired CIDRs from the current spec (empty set if the NATConfig was deleted).
-- Diffs against the previously tracked CIDRs for this NATConfig.
-- Adds new entries; removes dropped entries only if no other NATConfig still references the same
-  CIDR (reference-counted across all NATConfigs).
-- Updates the per-NATConfig tracking.
-- Applies the same diff to the `RouteAdvertiser`: calls `AdvertisePrefix` for newly added pool
-  CIDRs and `WithdrawPrefix` for dropped CIDRs that are no longer referenced by any NATConfig.
+Maintains three separate in-memory per-NATConfig tracking maps:
+- `ncTargetCIDRs` / `ncExtIPCIDRs`: CIDRs last written to the respective BPF maps.
+- `ncAdvertisedCIDRs`: CIDRs currently advertised by this node via BGP.
 
-All nodes advertise all pool CIDRs regardless of whether any pod is scheduled on the node. This
-keeps routes stable during daemon restarts — remaining nodes keep the prefixes reachable so
-stage 1 revNAT continues to work cluster-wide. On daemon restart the in-memory tracking is empty,
-so the first reconcile of each NATConfig re-advertises its entire pool (idempotent).
+Keeping advertisement state separate from BPF map state allows nodes excluded by `NodeSelector`
+to keep their BPF maps current (required for packet forwarding on all nodes) while not
+participating in BGP advertisement.
+
+On any NATConfig or local Node label-change event:
+- Computes desired BPF CIDRs from the current spec (empty if deleted).
+- Updates `target_cidrs` and `ext_ip_pool` BPF maps unconditionally on all nodes.
+- Evaluates `spec.nodeSelector` against this node's labels to determine `desiredRouteCIDRs`:
+  empty if the node does not match; equal to `externalIPPool` if it matches (or if
+  `nodeSelector` is nil — the default, which matches all nodes).
+- Diffs `desiredRouteCIDRs` against `ncAdvertisedCIDRs`; calls `AdvertisePrefix` for newly
+  matching CIDRs and `WithdrawPrefix` for CIDRs no longer matched, skipping withdrawal if
+  another NATConfig still has the same CIDR in its `ncAdvertisedCIDRs`.
+
+When `spec.nodeSelector` is nil (the default), all nodes advertise all pool CIDRs. This keeps
+routes stable during daemon restarts — remaining nodes keep the prefixes reachable so stage 1
+revNAT continues to work cluster-wide. On daemon restart the in-memory tracking is empty, so
+the first reconcile of each NATConfig re-advertises its entire pool and repopulates BPF maps
+(idempotent).
+
+Node label changes are handled by watching the local Node: when it changes, all NATConfigs are
+re-enqueued so advertisement is enabled or withdrawn immediately.
 
 NPRR lifecycle is owned entirely by the Pod controller (NATConfig changes fan out to all local
 pods via `EnqueueRequestsFromMapFunc`). The NATConfig controller has no field index on

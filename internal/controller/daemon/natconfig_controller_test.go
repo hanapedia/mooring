@@ -5,6 +5,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -152,6 +153,80 @@ var _ = Describe("NATConfig controller", func() {
 
 			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(newCIDR) })
 			eventually(func() bool { return mockRouteAdvertiser.hasWithdrawn(oldCIDR) })
+		})
+	})
+
+	Describe("node selector filtering", func() {
+		It("does not advertise routes when nodeSelector does not match node labels", func() {
+			uniqueKey := uniqueName("ns-key")
+			extCIDR := "203.0.120.0/30"
+			nc := &v1alpha1.NATConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("nc")},
+				Spec: v1alpha1.NATConfigSpec{
+					ExternalIPPool: []string{extCIDR},
+					PortRangeSize:  100,
+					TargetCIDRs:    []string{"10.40.0.0/24"},
+					PodSelector:    metav1.LabelSelector{},
+					NodeSelector:   &metav1.LabelSelector{MatchLabels: map[string]string{uniqueKey: "true"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+			eventually(func() bool { return mockExtIPPool.hasAdded(extCIDR) })
+			consistently(func() bool { return !mockRouteAdvertiser.hasAdvertised(extCIDR) })
+		})
+
+		It("advertises routes when nodeSelector matches node labels", func() {
+			uniqueKey := uniqueName("ns-key")
+
+			var node corev1.Node
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: testNodeName}, &node)).To(Succeed())
+			if node.Labels == nil {
+				node.Labels = map[string]string{}
+			}
+			node.Labels[uniqueKey] = "true"
+			Expect(k8sClient.Update(ctx, &node)).To(Succeed())
+
+			extCIDR := "203.0.121.0/30"
+			nc := &v1alpha1.NATConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("nc")},
+				Spec: v1alpha1.NATConfigSpec{
+					ExternalIPPool: []string{extCIDR},
+					PortRangeSize:  100,
+					TargetCIDRs:    []string{"10.41.0.0/24"},
+					PodSelector:    metav1.LabelSelector{},
+					NodeSelector:   &metav1.LabelSelector{MatchLabels: map[string]string{uniqueKey: "true"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(extCIDR) })
+		})
+
+		It("advertises routes when node labels are updated to match nodeSelector", func() {
+			uniqueKey := uniqueName("ns-key")
+			extCIDR := "203.0.122.0/30"
+			nc := &v1alpha1.NATConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("nc")},
+				Spec: v1alpha1.NATConfigSpec{
+					ExternalIPPool: []string{extCIDR},
+					PortRangeSize:  100,
+					TargetCIDRs:    []string{"10.42.0.0/24"},
+					PodSelector:    metav1.LabelSelector{},
+					NodeSelector:   &metav1.LabelSelector{MatchLabels: map[string]string{uniqueKey: "true"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+			eventually(func() bool { return mockExtIPPool.hasAdded(extCIDR) })
+			consistently(func() bool { return !mockRouteAdvertiser.hasAdvertised(extCIDR) })
+
+			var node corev1.Node
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: testNodeName}, &node)).To(Succeed())
+			if node.Labels == nil {
+				node.Labels = map[string]string{}
+			}
+			node.Labels[uniqueKey] = "true"
+			Expect(k8sClient.Update(ctx, &node)).To(Succeed())
+
+			eventually(func() bool { return mockRouteAdvertiser.hasAdvertised(extCIDR) })
 		})
 	})
 })

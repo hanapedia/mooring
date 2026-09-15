@@ -14,6 +14,10 @@ type NATConfigSpec struct {
 	TargetCIDRs []string `json:"targetCIDRs"`
 	// PodSelector selects pods managed by this NATConfig.
 	PodSelector metav1.LabelSelector `json:"podSelector"`
+	// NodeSelector selects nodes that should advertise the return path via BGP.
+	// If not specified, all nodes advertise.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
 // +kubebuilder:object:root=true
