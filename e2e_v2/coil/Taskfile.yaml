@@ -5,7 +5,8 @@ vars:
   COIL_VERSION: '{{.COIL_VERSION | default "2.15.0"}}'
   COIL_TAG: '{{.COIL_TAG | default "2.15.0"}}'
   COIL_REPO: '{{.COIL_REPO | default "https://github.com/cybozu-go/coil.git"}}'
-  COIL_DIR: '{{.COIL_DIR | default "/tmp/coil"}}'
+  COIL_REPO_DIR: 'worktrees/coil.git'
+  COIL_DIR: 'worktrees/v{{.COIL_VERSION}}'
   COIL_IMAGE: '{{.COIL_IMAGE | default "ghcr.io/cybozu-go/coil"}}'
 
 tasks:
@@ -44,8 +45,8 @@ tasks:
   generate-upstream-manifests:
     desc: Generate Coil upstream manifests from source
     cmds:
-      - task: clone
-      - task: checkout
+      - task: init-repo
+      - task: add-worktree
       - task: generate-certificates
       - kustomize build --load-restrictor=LoadRestrictionsNone {{.COIL_DIR}}/v2 > upstream.yaml
       - task: patch-image
@@ -88,18 +89,21 @@ tasks:
         CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
         sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/egress/webhook_manifests_patch.yaml
 
-  clone:
-    desc: Clone Coil repository
+  init-repo:
+    desc: Bare-clone Coil repository (once; idempotent)
     cmds:
-      - mkdir -p {{.COIL_DIR}}
-      - git clone --depth 1 --branch v{{.COIL_VERSION}} {{.COIL_REPO}} {{.COIL_DIR}}
+      - mkdir -p worktrees
+      - git clone --bare {{.COIL_REPO}} {{.COIL_REPO_DIR}}
     status:
-      - test -d "{{.COIL_DIR}}/.git"
+      - test -d "{{.COIL_REPO_DIR}}"
 
-  checkout:
-    desc: Checkout Coil version
+  add-worktree:
+    desc: Create a git worktree for the specified version (idempotent)
     cmds:
-      - cd {{.COIL_DIR}}; git checkout v{{.COIL_VERSION}}
+      - git -C {{.COIL_REPO_DIR}} fetch --tags origin
+      - git -C {{.COIL_REPO_DIR}} worktree add ../v{{.COIL_VERSION}} v{{.COIL_VERSION}}
+    status:
+      - test -d "{{.COIL_DIR}}"
 
   docker-pull:
     desc: Pull a specified image if it doesn't exist locally
