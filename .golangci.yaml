@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  exclude-dirs:
+    - e2e_v2/coil/worktrees
+    - e2e_v2/cilium/worktrees
+
 formatters:
   enable:
     - gofumpt

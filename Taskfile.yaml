@@ -45,7 +45,7 @@ tasks:
   fmt:
     desc: Format Go and C sources (gofumpt + clang-format; skips generated vmlinux.h)
     cmds:
-      - gofumpt -l -w .
+      - find . -name "*.go" -not -path "*/worktrees/*" | xargs gofumpt -l -w
       - clang-format -i bpf/*.c bpf/headers/maps.h bpf/headers/tc.h
 
   lint:

@@ -149,8 +149,7 @@ type SnatEgressMapSpecs struct {
 // SnatEgressVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type SnatEgressVariableSpecs struct {
-}
+type SnatEgressVariableSpecs struct{}
 
 // SnatEgressObjects contains all objects after they have been loaded into the kernel.
 //
@@ -194,8 +193,7 @@ func (m *SnatEgressMaps) Close() error {
 // SnatEgressVariables contains all global variables after they have been loaded into the kernel.
 //
 // It can be passed to LoadSnatEgressObjects or ebpf.CollectionSpec.LoadAndAssign.
-type SnatEgressVariables struct {
-}
+type SnatEgressVariables struct{}
 
 // SnatEgressPrograms contains all programs after they have been loaded into the kernel.
 //
