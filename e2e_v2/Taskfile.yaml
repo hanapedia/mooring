@@ -27,12 +27,24 @@ vars:
 
 tasks:
   start:
-    desc: Start k8s on BGP network infrastructure
+    desc: Start k8s on BGP network infrastructure with Coil CNI
     cmds:
       - task: build-bird-container
       - task: start-kind-without-cni
       - task: pull-and-load-debug-images
       - task: coil:install
+      - task: install-mooring
+      - task: apply-sample-resources
+
+  start-cilium:
+    desc: Start k8s on BGP network infrastructure with Cilium CNI
+    cmds:
+      - task: build-bird-container
+      - task: start-kind-without-cni
+        vars: { KIND_CONFIG: ../cilium/cluster.kind.yaml }
+      - task: pull-and-load-debug-images
+      - task: cilium:install
+        vars: { K8S_VERSION: "{{.K8S_VERSION}}" }
       - task: install-mooring
       - task: apply-sample-resources
 
@@ -42,10 +54,13 @@ tasks:
       - task: stop-kind-without-cni
 
   start-kind-without-cni:
-    desc: Start kind cluster without kube-proxy and CNI
+    desc: Start kind cluster without CNI
+    vars:
+      KIND_CONFIG: '{{.KIND_CONFIG | default "cluster.kind.yaml"}}'
     dir: network
     cmds:
       - task: generate-cluster-clab-yaml
+        vars: { KIND_CONFIG: "{{.KIND_CONFIG}}" }
       - sudo containerlab deploy -t cluster.clab.yaml
       - kind export kubeconfig --name kind-with-bgp
 
@@ -94,6 +109,7 @@ tasks:
         ' ../manifests/agent.yaml | kubectl apply -f -
       - kubectl wait -n mooring-system --for=condition=available --timeout=300s deployment/mooring-operator
       - kubectl wait -n mooring-system --for=condition=ready --timeout=300s pod --selector=app=mooring-agent
+      - kubectl apply -f network/mooring/natconfig.yaml
 
   build-operator-image:
     desc: Build the mooring operator container image
@@ -141,6 +157,7 @@ tasks:
   generate-cluster-clab-yaml:
     desc: Generate cluster.clab.yaml
     vars:
+      KIND_CONFIG: '{{.KIND_CONFIG | default "cluster.kind.yaml"}}'
       CONTROL_PLANE_IP:
         sh: yq '.[] | select(.name == "control-plane") | .ip' network/nodes.yaml
       CONTROL_PLANE_GW:
@@ -157,6 +174,7 @@ tasks:
       - >
         sed
         -e "s/BIRD_VERSION/{{.BIRD_VERSION}}/g"
+        -e "s|__KIND_CONFIG__|{{.KIND_CONFIG}}|g"
         -e "s|__CONTROL_PLANE_IP__|{{.CONTROL_PLANE_IP}}|g"
         -e "s|__CONTROL_PLANE_GW__|{{.CONTROL_PLANE_GW}}|g"
         -e "s|__WORKER_IP__|{{.WORKER_IP}}|g"
