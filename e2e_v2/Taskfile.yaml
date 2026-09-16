@@ -197,3 +197,86 @@ tasks:
         else
           echo "{{.IMAGE_NAME}} already exists locally, skip pulling."
         fi
+
+  # ── performance tests ─────────────────────────────────────────────────────────
+
+  perf-setup-coil:
+    desc: Deploy Coil AddressPool, Egress, and client pods for performance testing
+    cmds:
+      - kubectl apply -f network/coil/address-pool.yaml
+      - kubectl apply -f network/coil/egress.yaml
+      - kubectl apply -f network/coil/client-pods.yaml
+      - kubectl wait -n coil-perf --for=condition=available --timeout=300s deployment/perf-egress
+      - kubectl wait pod -l app=coil-perf-client -n default --for condition=Ready --timeout 300s
+
+  perf-server-start:
+    desc: Start iperf3 server on domestic0 (192.168.0.100)
+    cmds:
+      - docker exec clab-kind-with-bgp-domestic0 iperf3 -s -D
+
+  perf-server-stop:
+    desc: Stop iperf3 server on domestic0
+    cmds:
+      - docker exec clab-kind-with-bgp-domestic0 pkill iperf3 || true
+
+  perf-mooring-fast:
+    desc: "Mooring fast path perf: client and NAT gateway on same node (worker)"
+    vars:
+      SERVER: 192.168.0.100
+      POD: domestic1-client-kind-with-bgp-worker
+    cmds:
+      - |
+        echo "=== Mooring Fast Path: Big Packets ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30
+      - |
+        echo "=== Mooring Fast Path: Small Packets (128-byte blocks) ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30 -l 128
+
+  perf-mooring-slow:
+    desc: "Mooring slow path perf: client on worker2, NAT gateway on worker"
+    vars:
+      SERVER: 192.168.0.100
+      POD: domestic1-client-kind-with-bgp-worker2
+    cmds:
+      - |
+        echo "=== Mooring Slow Path: Big Packets ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30
+      - |
+        echo "=== Mooring Slow Path: Small Packets (128-byte blocks) ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30 -l 128
+
+  perf-coil-fast:
+    desc: "Coil fast path perf: client and egress pod on same node (worker)"
+    vars:
+      SERVER: 192.168.0.100
+      POD: coil-perf-client-kind-with-bgp-worker
+    cmds:
+      - |
+        echo "=== Coil Fast Path: Big Packets ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30
+      - |
+        echo "=== Coil Fast Path: Small Packets (128-byte blocks) ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30 -l 128
+
+  perf-coil-slow:
+    desc: "Coil slow path perf: client on worker2, egress pod on worker"
+    vars:
+      SERVER: 192.168.0.100
+      POD: coil-perf-client-kind-with-bgp-worker2
+    cmds:
+      - |
+        echo "=== Coil Slow Path: Big Packets ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30
+      - |
+        echo "=== Coil Slow Path: Small Packets (128-byte blocks) ==="
+        kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30 -l 128
+
+  perf-all:
+    desc: Run all performance tests (mooring and coil, fast and slow, big and small packets)
+    cmds:
+      - task: perf-server-start
+      - task: perf-mooring-fast
+      - task: perf-mooring-slow
+      - task: perf-coil-fast
+      - task: perf-coil-slow
+      - task: perf-server-stop

@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: coil-perf-client-kind-with-bgp-worker
+  namespace: default
+  labels:
+    app: coil-perf-client
+  annotations:
+    egress.coil.cybozu.com/coil-perf: perf-egress
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: kind-with-bgp-worker
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: coil-perf-client-kind-with-bgp-worker2
+  namespace: default
+  labels:
+    app: coil-perf-client
+  annotations:
+    egress.coil.cybozu.com/coil-perf: perf-egress
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: kind-with-bgp-worker2
+  containers:
+  - name: ubuntu
+    image: ghcr.io/cybozu/ubuntu-debug:24.04
+    imagePullPolicy: IfNotPresent
+    command:
+    - sleep
+    - infinity
