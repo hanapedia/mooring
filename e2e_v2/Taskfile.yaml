@@ -52,6 +52,16 @@ tasks:
       - task: install-mooring
       - task: apply-sample-resources
 
+  start-without-mooring:
+    desc: Start k8s on BGP network infrastructure with Coil CNI but without mooring
+    cmds:
+      - task: build-bird-container
+      - task: start-kind-without-cni
+      - task: pull-and-load-debug-images
+      - task: coil:install
+      - task: apply-sample-resources
+      - task: perf-setup-coil
+
   stop:
     desc: Stop k8s on BGP network infrastructure
     cmds:
@@ -301,12 +311,18 @@ tasks:
         echo "=== Coil Slow Path: Small Packets (128-byte blocks) ==="
         kubectl exec -n default {{.POD}} -- iperf3 -c {{.SERVER}} -t 30 -l 128
 
-  perf-all:
-    desc: Run all performance tests (mooring and coil, fast and slow, big and small packets)
+  perf-mooring:
+    desc: Run performance tests for mooring (fast and slow, big and small packets)
     cmds:
       - task: perf-server-start
       - task: perf-mooring-fast
       - task: perf-mooring-slow
+      - task: perf-server-stop
+
+  perf-coil:
+    desc: Run performance tests for coil (fast and slow, big and small packets)
+    cmds:
+      - task: perf-server-start
       - task: perf-coil-fast
       - task: perf-coil-slow
       - task: perf-server-stop
