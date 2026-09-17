@@ -13,6 +13,10 @@ vars:
   K8S_VERSION: '{{.K8S_VERSION | default "1.34.8"}}'
   BIRD_VERSION: '{{.BIRD_VERSION | default "3.2.2.1"}}'
 
+  CONTAINERLAB_VERSION: '{{.CONTAINERLAB_VERSION | default "0.79.0"}}'
+  CONTAINERLAB_CHECKSUM_AMD64: f90d36d58bb6c4afd3b3a4dca006b81594c6d16f7a04be0184b03f44291085a2
+  CONTAINERLAB_CHECKSUM_ARM64: e89e051f71fad7ad1c74c0189fb260539c1f5637e5c10fe53f74fa6b4dbe5298
+
   MOORING_IMAGE: '{{.MOORING_IMAGE | default "ghcr.io/hanapedia/mooring"}}'
   MOORING_TAG: '{{.MOORING_TAG | default "v0.1.0"}}'
 
@@ -53,12 +57,38 @@ tasks:
     cmds:
       - task: stop-kind-without-cni
 
+  install-containerlab:
+    desc: Download, checksum-verify, and install the pinned containerlab release
+    status:
+      - test "$(containerlab version --short 2>/dev/null | tr -d 'v')" = "{{.CONTAINERLAB_VERSION}}"
+    vars:
+      ARCH:
+        sh: |
+          case "$(uname -m)" in
+            x86_64) echo amd64 ;;
+            aarch64|arm64) echo arm64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+      TARBALL: 'containerlab_{{.CONTAINERLAB_VERSION}}_linux_{{.ARCH}}.tar.gz'
+      CHECKSUM: '{{if eq .ARCH "amd64"}}{{.CONTAINERLAB_CHECKSUM_AMD64}}{{else}}{{.CONTAINERLAB_CHECKSUM_ARM64}}{{end}}'
+    cmds:
+      - |
+        set -euo pipefail
+        tmpdir="$(mktemp -d)"
+        trap 'rm -rf "$tmpdir"' EXIT
+        curl -sSLo "$tmpdir/{{.TARBALL}}" \
+          "https://github.com/srl-labs/containerlab/releases/download/v{{.CONTAINERLAB_VERSION}}/{{.TARBALL}}"
+        echo "{{.CHECKSUM}}  $tmpdir/{{.TARBALL}}" | sha256sum -c -
+        tar -xzf "$tmpdir/{{.TARBALL}}" -C "$tmpdir" containerlab
+        sudo install -m 0755 "$tmpdir/containerlab" /usr/local/bin/containerlab
+
   start-kind-without-cni:
     desc: Start kind cluster without CNI
     vars:
       KIND_CONFIG: '{{.KIND_CONFIG | default "cluster.kind.yaml"}}'
     dir: network
     cmds:
+      - task: install-containerlab
       - task: generate-cluster-clab-yaml
         vars: { KIND_CONFIG: "{{.KIND_CONFIG}}" }
       - sudo containerlab deploy -t cluster.clab.yaml

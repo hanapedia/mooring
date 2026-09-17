@@ -8,6 +8,7 @@ vars:
   COIL_REPO_DIR: 'worktrees/coil.git'
   COIL_DIR: 'worktrees/v{{.COIL_VERSION}}'
   COIL_IMAGE: '{{.COIL_IMAGE | default "ghcr.io/cybozu-go/coil"}}'
+  GENCERT_BIN: '{{.COIL_DIR}}/v2/bin/gencert'
 
 tasks:
   install:
@@ -47,6 +48,7 @@ tasks:
     cmds:
       - task: init-repo
       - task: add-worktree
+      - task: build-gencert
       - task: generate-certificates
       - kustomize build --load-restrictor=LoadRestrictionsNone {{.COIL_DIR}}/v2 > upstream.yaml
       - task: patch-image
@@ -76,12 +78,19 @@ tasks:
           .image) = "{{.COIL_IMAGE}}:{{.COIL_TAG}}"
           ' upstream.yaml
 
+  build-gencert:
+    desc: Build the gencert binary from the Coil source tree (idempotent)
+    cmds:
+      - cd {{.COIL_DIR}}/v2 && go build -o bin/gencert ./cmd/gencert
+    status:
+      - test -x {{.GENCERT_BIN}}
+
   generate-certificates:
     desc: Generate Coil webhook certificates
     cmds:
-      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-webhook-service -host=coilv2-webhook-service.kube-system.svc -certname=cert.pem -keyname=key.pem
-      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-ipam-webhook-service -host=coilv2-ipam-webhook-service.kube-system.svc -certname=ipam-cert.pem -keyname=ipam-key.pem -ca=cert.pem -cakey=key.pem
-      - gencert -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-egress-webhook-service -host=coilv2-egress-webhook-service.kube-system.svc -certname=egress-cert.pem -keyname=egress-key.pem -ca=cert.pem -cakey=key.pem
+      - '{{.GENCERT_BIN}} -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-webhook-service -host=coilv2-webhook-service.kube-system.svc -certname=cert.pem -keyname=key.pem'
+      - '{{.GENCERT_BIN}} -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-ipam-webhook-service -host=coilv2-ipam-webhook-service.kube-system.svc -certname=ipam-cert.pem -keyname=ipam-key.pem -ca=cert.pem -cakey=key.pem'
+      - '{{.GENCERT_BIN}} -outdir={{.COIL_DIR}}/v2/config/default -cn=coilv2-egress-webhook-service -host=coilv2-egress-webhook-service.kube-system.svc -certname=egress-cert.pem -keyname=egress-key.pem -ca=cert.pem -cakey=key.pem'
       - |
         CACERT_DATA=$(base64 -w0 < {{.COIL_DIR}}/v2/config/default/cert.pem)
         sed "s/%CACERT%/${CACERT_DATA}/g" {{.COIL_DIR}}/v2/config/default/ipam/webhook_manifests_patch.yaml.tmpl > {{.COIL_DIR}}/v2/config/default/ipam/webhook_manifests_patch.yaml
