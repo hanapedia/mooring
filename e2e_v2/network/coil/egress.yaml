@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coil-perf
+  annotations:
+    coil.cybozu.com/pool: perf-egress-pool
+---
+apiVersion: coil.cybozu.com/v2
+kind: Egress
+metadata:
+  name: perf-egress
+  namespace: coil-perf
+spec:
+  replicas: 1
+  destinations:
+  - 192.168.10.0/24
+  - 192.168.0.0/24
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: kind-with-bgp-worker
+      containers:
+      - name: egress

@@ -8,6 +8,7 @@ spec:
   portRangeSize: 100
   targetCIDRs:
     - 192.168.10.0/24
+    - 192.168.0.0/24
   podSelector:
     matchLabels:
       app: domestic1-client

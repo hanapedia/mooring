@@ -65,6 +65,17 @@ The operator is responsible for this allocation and records the result in a `NAT
 
 Every node advertises all external IPs in the pool via BGP (ECMP). This ensures return traffic from an external server can reach any node, regardless of which node performed the original SNAT. The node that ran Stage 1 revNAT forwards cross-node packets to the pod's home node via existing BGP pod-CIDR routes.
 
+## Performance
+
+A single-stream `iperf3` comparison against coil's egress NAT pods, run in a kind cluster with BGP underlay (fast path = pod local to the SNAT/NAT node, slow path = cross-node; big packets = 128 KB, iperf3's default buffer size; small packets = 128 B):
+
+| | Fast, big packets | Fast, small packets | Slow, big packets | Slow, small packets |
+|---|---|---|---|---|
+| mooring | 29.4 Gbits/sec | 2.63 Gbits/sec | 29.2 Gbits/sec | 2.60 Gbits/sec |
+| coil | 23.4 Gbits/sec | 2.55 Gbits/sec | 15.0 Gbits/sec | 2.39 Gbits/sec |
+
+mooring outperforms coil on the fast path (~26% higher big-packet throughput) and pulls further ahead on the slow (cross-node) path, where coil's dedicated NAT pod becomes a bottleneck (~95% higher big-packet throughput). See [docs/mooring-perf.md](docs/mooring-perf.md) and [docs/coil-egress-perf.md](docs/coil-egress-perf.md) for full `iperf3` output.
+
 ## Getting Started
 
 ### Prerequisites

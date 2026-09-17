@@ -46,7 +46,6 @@
               yq-go
               jq
               pinact
-              containerlab
             ];
           };
         }
