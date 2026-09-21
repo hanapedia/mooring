@@ -31,6 +31,22 @@ jobs:
       - name: Run controller tests
         run: nix develop --command task test
 
+  test-bpf:
+    name: Test eBPF datapath
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: ./.github/actions/setup-nix
+
+      - name: Generate BPF headers and Go bindings
+        run: |
+          nix develop --command task setup
+          nix develop --command task generate
+
+      - name: Run eBPF datapath tests (privileged)
+        run: nix develop --command task test-bpf
+
   build:
     name: Build
     runs-on: ubuntu-latest

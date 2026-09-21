@@ -72,11 +72,17 @@ tasks:
     cmds:
       - KUBEBUILDER_ASSETS={{.ENVTEST_ASSETS}} go test ./internal/controller/...
 
+  test-bpf:
+    desc: Run privileged eBPF datapath tests via BPF_PROG_TEST_RUN (requires root/CAP_BPF; run `task generate` first)
+    cmds:
+      - sudo env "PATH=$PATH" go test -tags=bpftest -v ./internal/bpf/...
+
   generate:
     desc: Generate Go BPF bindings from C sources (requires clang and task setup)
     dir: internal/bpf
     cmds:
       - go generate .
+      - task: fmt
 
   build:
     desc: Build moorctl binary to bin/moorctl
