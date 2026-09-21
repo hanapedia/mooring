@@ -13,39 +13,39 @@ var mapCmd = &cobra.Command{
 	Short: "Manage BPF map entries",
 }
 
-// ── snat-config ───────────────────────────────────────────────────────────────
+// ── nat-config ───────────────────────────────────────────────────────────────
 
 var (
-	scPodIP      string
-	scExtIP      string
-	scTargetCIDR string
-	scPortStart  uint16
-	scPortEnd    uint16
+	ncPodIP      string
+	ncExtIP      string
+	ncTargetCIDR string
+	ncPortStart  uint16
+	ncPortEnd    uint16
 )
 
-var snatConfigAddCmd = &cobra.Command{
+var natConfigAddCmd = &cobra.Command{
 	Use:   "add",
-	Short: "Add a SNAT config entry for a pod",
-	RunE:  runSnatConfigAdd,
+	Short: "Add a NAT config entry for a pod",
+	RunE:  runNatConfigAdd,
 }
 
-func runSnatConfigAdd(_ *cobra.Command, _ []string) error {
-	podIP := net.ParseIP(scPodIP).To4()
+func runNatConfigAdd(_ *cobra.Command, _ []string) error {
+	podIP := net.ParseIP(ncPodIP).To4()
 	if podIP == nil {
-		return fmt.Errorf("invalid --pod-ip %q", scPodIP)
+		return fmt.Errorf("invalid --pod-ip %q", ncPodIP)
 	}
-	extIP := net.ParseIP(scExtIP).To4()
+	extIP := net.ParseIP(ncExtIP).To4()
 	if extIP == nil {
-		return fmt.Errorf("invalid --ext-ip %q", scExtIP)
+		return fmt.Errorf("invalid --ext-ip %q", ncExtIP)
 	}
-	_, targetCIDR, err := net.ParseCIDR(scTargetCIDR)
+	_, targetCIDR, err := net.ParseCIDR(ncTargetCIDR)
 	if err != nil {
 		return fmt.Errorf("invalid --target-cidr: %w", err)
 	}
-	if scPortStart > scPortEnd {
+	if ncPortStart > ncPortEnd {
 		return fmt.Errorf("--port-start must be <= --port-end")
 	}
-	return maps.UpsertSnatEntry(podIP, targetCIDR, extIP, scPortStart, scPortEnd)
+	return maps.UpsertNatConfigEntry(podIP, targetCIDR, extIP, ncPortStart, ncPortEnd)
 }
 
 // ── target-cidr ───────────────────────────────────────────────────────────────
@@ -148,19 +148,19 @@ func parseProto(s string) (uint8, error) {
 func init() {
 	rootCmd.AddCommand(mapCmd)
 
-	snatConfigCmd := &cobra.Command{Use: "snat-config", Short: "Manage the snat_config map"}
-	mapCmd.AddCommand(snatConfigCmd)
-	snatConfigCmd.AddCommand(snatConfigAddCmd)
-	snatConfigAddCmd.Flags().StringVar(&scPodIP, "pod-ip", "", "pod source IP (required)")
-	snatConfigAddCmd.Flags().StringVar(&scExtIP, "ext-ip", "", "external (SNAT) IP (required)")
-	snatConfigAddCmd.Flags().StringVar(&scTargetCIDR, "target-cidr", "", "target CIDR matched by the packet destination (required)")
-	snatConfigAddCmd.Flags().Uint16Var(&scPortStart, "port-start", 0, "first port in range (required)")
-	snatConfigAddCmd.Flags().Uint16Var(&scPortEnd, "port-end", 0, "last port in range (required)")
-	_ = snatConfigAddCmd.MarkFlagRequired("pod-ip")
-	_ = snatConfigAddCmd.MarkFlagRequired("ext-ip")
-	_ = snatConfigAddCmd.MarkFlagRequired("target-cidr")
-	_ = snatConfigAddCmd.MarkFlagRequired("port-start")
-	_ = snatConfigAddCmd.MarkFlagRequired("port-end")
+	natConfigCmd := &cobra.Command{Use: "nat-config", Short: "Manage the nat_config map"}
+	mapCmd.AddCommand(natConfigCmd)
+	natConfigCmd.AddCommand(natConfigAddCmd)
+	natConfigAddCmd.Flags().StringVar(&ncPodIP, "pod-ip", "", "pod source IP (required)")
+	natConfigAddCmd.Flags().StringVar(&ncExtIP, "ext-ip", "", "external (SNAT) IP (required)")
+	natConfigAddCmd.Flags().StringVar(&ncTargetCIDR, "target-cidr", "", "target CIDR matched by the packet destination (required)")
+	natConfigAddCmd.Flags().Uint16Var(&ncPortStart, "port-start", 0, "first port in range (required)")
+	natConfigAddCmd.Flags().Uint16Var(&ncPortEnd, "port-end", 0, "last port in range (required)")
+	_ = natConfigAddCmd.MarkFlagRequired("pod-ip")
+	_ = natConfigAddCmd.MarkFlagRequired("ext-ip")
+	_ = natConfigAddCmd.MarkFlagRequired("target-cidr")
+	_ = natConfigAddCmd.MarkFlagRequired("port-start")
+	_ = natConfigAddCmd.MarkFlagRequired("port-end")
 
 	targetCIDRCmd := &cobra.Command{Use: "target-cidr", Short: "Manage the target_cidrs map"}
 	mapCmd.AddCommand(targetCIDRCmd)

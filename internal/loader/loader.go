@@ -32,15 +32,19 @@ func Load(iface string) error {
 		}
 	}
 
-	// Load snat_egress. Creates nat_table and target_cidrs; revnat shares them.
+	// Load snat_egress. Creates nat_map and target_cidrs; revnat shares them.
 	snatObjs := &mooringbpf.SnatEgressObjects{}
 	if err := mooringbpf.LoadSnatEgressObjects(snatObjs, nil); err != nil {
 		return fmt.Errorf("load snat_egress: %w", err)
 	}
 	defer snatObjs.Close()
 
-	// Load revnat_ingress, injecting the already-created nat_table and
-	// target_cidrs so both programs operate on the same maps.
+	// Load revnat_ingress, injecting the already-created nat_map and
+	// target_cidrs so both programs operate on the same maps. nat_map holds
+	// both the forward (snat) and reverse (revnat) direction of every tracked
+	// connection, so revnat_ingress needs it both to resolve the pod port and
+	// to mark/confirm/delete the paired snat entry for connection tracking on
+	// the server->pod direction.
 	revnatSpec, err := mooringbpf.LoadRevnatIngress()
 	if err != nil {
 		return fmt.Errorf("load revnat_ingress spec: %w", err)
@@ -48,23 +52,18 @@ func Load(iface string) error {
 	revnatObjs := &mooringbpf.RevnatIngressObjects{}
 	if err := revnatSpec.LoadAndAssign(revnatObjs, &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
-			"nat_table_tcp":  snatObjs.NatTableTcp,
-			"nat_table_udp":  snatObjs.NatTableUdp,
-			"nat_table_icmp": snatObjs.NatTableIcmp,
-			"target_cidrs":   snatObjs.TargetCidrs,
+			"nat_map":      snatObjs.NatMap,
+			"target_cidrs": snatObjs.TargetCidrs,
 		},
 	}); err != nil {
 		return fmt.Errorf("load revnat_ingress: %w", err)
 	}
 	defer revnatObjs.Close()
 
-	// Pin maps. Shared maps (nat_table_*, target_cidrs) are pinned from snatObjs.
+	// Pin maps. Shared maps (nat_map, target_cidrs) are pinned from snatObjs.
 	for name, m := range map[string]*ebpf.Map{
-		"snat_config":            snatObjs.SnatConfig,
-		"nat_table_tcp":          snatObjs.NatTableTcp,
-		"nat_table_udp":          snatObjs.NatTableUdp,
-		"nat_table_icmp":         snatObjs.NatTableIcmp,
-		"outbound_sessions":      snatObjs.OutboundSessions,
+		"nat_config":             snatObjs.NatConfig,
+		"nat_map":                snatObjs.NatMap,
 		"target_cidrs":           snatObjs.TargetCidrs,
 		"ext_ip_pool":            revnatObjs.ExtIpPool,
 		"port_range_lookup_tcp":  revnatObjs.PortRangeLookupTcp,

@@ -26,22 +26,22 @@ type NATPortRangeSyncReconciler struct {
 	client.Client
 	NodeName        string
 	PortRangeLookup PortRangeLookupMap
-	SnatConfig      SnatConfigMap
+	NatConfig       NatConfigMap
 	mu              sync.Mutex
 	synced          map[string]syncedNPR // key: NPR name
 }
 
-func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, snatConfig SnatConfigMap) *NATPortRangeSyncReconciler {
+func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, natConfig NatConfigMap) *NATPortRangeSyncReconciler {
 	return &NATPortRangeSyncReconciler{
 		Client:          c,
 		NodeName:        nodeName,
 		PortRangeLookup: portRangeLookup,
-		SnatConfig:      snatConfig,
+		NatConfig:       natConfig,
 		synced:          make(map[string]syncedNPR),
 	}
 }
 
-// Reconcile syncs the snat_config map for local pods and the per-protocol
+// Reconcile syncs the nat_config map for local pods and the per-protocol
 // port_range_lookup maps against NATPortRange resources.
 func (r *NATPortRangeSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var npr v1alpha1.NATPortRange
@@ -86,8 +86,8 @@ func (r *NATPortRangeSyncReconciler) syncStale(ctx context.Context, npr *v1alpha
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 			}
-			if err := r.SnatConfig.RemoveAllocs(podIP, cidr, extIPs); err != nil {
-				return ctrl.Result{}, fmt.Errorf("remove snat allocs for CIDR %s: %w", cidrStr, err)
+			if err := r.NatConfig.RemoveAllocs(podIP, cidr, extIPs); err != nil {
+				return ctrl.Result{}, fmt.Errorf("remove nat config allocs for CIDR %s: %w", cidrStr, err)
 			}
 		}
 	}
@@ -129,7 +129,7 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 	if npr.Spec.NodeName == r.NodeName {
 		removedCIDRs, addedCIDRs, commonCIDRs := diffStringSlices(cachedCIDRsCopy, npr.Spec.TargetCIDRs)
 
-		// Dropped target CIDRs: remove the entire snat_config entry for that CIDR.
+		// Dropped target CIDRs: remove the entire nat_config entry for that CIDR.
 		if len(removedCIDRs) > 0 {
 			oldExtIPs := uniqueExtIPs(cachedAllocsCopy)
 			for _, cidrStr := range removedCIDRs {
@@ -137,8 +137,8 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 				}
-				if err := r.SnatConfig.RemoveAllocs(podIP, cidr, oldExtIPs); err != nil {
-					return ctrl.Result{}, fmt.Errorf("remove snat allocs for dropped CIDR %s: %w", cidrStr, err)
+				if err := r.NatConfig.RemoveAllocs(podIP, cidr, oldExtIPs); err != nil {
+					return ctrl.Result{}, fmt.Errorf("remove nat config allocs for dropped CIDR %s: %w", cidrStr, err)
 				}
 			}
 		}
@@ -151,11 +151,11 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 				}
-				// See invariant note on RemoveSnatAllocs: correct only when
+				// See invariant note on RemoveNatConfigAllocs: correct only when
 				// NATConfig pools are non-overlapping (same ext-IP never in two
 				// different NPRs for the same pod and the same target CIDR).
-				if err := r.SnatConfig.RemoveAllocs(podIP, cidr, removedExtIPs); err != nil {
-					return ctrl.Result{}, fmt.Errorf("remove snat allocs: %w", err)
+				if err := r.NatConfig.RemoveAllocs(podIP, cidr, removedExtIPs); err != nil {
+					return ctrl.Result{}, fmt.Errorf("remove nat config allocs: %w", err)
 				}
 			}
 		}
@@ -168,8 +168,8 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 			}
 			for _, a := range npr.Spec.Allocations {
 				extIP := net.ParseIP(a.ExternalIP)
-				if err := r.SnatConfig.Upsert(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
-					return ctrl.Result{}, fmt.Errorf("upsert snat entry: %w", err)
+				if err := r.NatConfig.Upsert(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+					return ctrl.Result{}, fmt.Errorf("upsert nat config entry: %w", err)
 				}
 			}
 		}
@@ -182,8 +182,8 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("parse target CIDR %s: %w", cidrStr, err)
 				}
-				if err := r.SnatConfig.Upsert(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
-					return ctrl.Result{}, fmt.Errorf("upsert snat entry: %w", err)
+				if err := r.NatConfig.Upsert(podIP, cidr, extIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+					return ctrl.Result{}, fmt.Errorf("upsert nat config entry: %w", err)
 				}
 			}
 		}

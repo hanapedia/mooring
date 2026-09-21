@@ -27,12 +27,12 @@ func openMap(name string) (*ebpf.Map, error) {
 	return m, nil
 }
 
-// UpsertSnatEntry adds or updates the snat_config allocation for
-// (podIP, targetCIDR, extIP). If an entry for extIP already exists within the
-// (podIP, targetCIDR) bucket it is overwritten with the new range and its
-// next_port counter reset to zero; otherwise a new entry is appended.
-func UpsertSnatEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
-	m, err := openMap("snat_config")
+// UpsertNatConfigEntry adds or updates the nat_config port-range allocation
+// for (podIP, targetCIDR, extIP). If an entry for extIP already exists within
+// the (podIP, targetCIDR) bucket it is overwritten with the new range;
+// otherwise a new entry is appended.
+func UpsertNatConfigEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
+	m, err := openMap("nat_config")
 	if err != nil {
 		return err
 	}
@@ -43,40 +43,38 @@ func UpsertSnatEntry(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStar
 	if cidrIP4 == nil {
 		return fmt.Errorf("only IPv4 target CIDRs are supported")
 	}
-	key := mooringbpf.SnatEgressSnatConfigKey{
+	key := mooringbpf.SnatEgressNatConfigKey{
 		PodIp:         ipToUint32(podIP.To4()),
 		CidrAddr:      ipToUint32(cidrIP4),
 		CidrPrefixlen: uint32(ones),
 	}
 	extIPVal := ipToUint32(extIP)
 
-	var val mooringbpf.SnatEgressSnatConfigVal
+	var val mooringbpf.SnatEgressNatConfigVal
 	if err := m.Lookup(key, &val); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("lookup snat_config: %w", err)
+		return fmt.Errorf("lookup nat_config: %w", err)
 	}
 
 	found := false
-	for i := range val.Allocations {
+	for i := range val.PortRangeAllocs {
 		if uint32(i) >= val.Count {
 			break
 		}
-		if val.Allocations[i].ExtIp == extIPVal {
-			val.Allocations[i].PortStart = portStart
-			val.Allocations[i].PortEnd = portEnd
-			val.Allocations[i].NextPort = 0
+		if val.PortRangeAllocs[i].ExtIp == extIPVal {
+			val.PortRangeAllocs[i].PortStart = portStart
+			val.PortRangeAllocs[i].PortEnd = portEnd
 			found = true
 			break
 		}
 	}
 	if !found {
-		if val.Count >= uint32(len(val.Allocations)) {
-			return fmt.Errorf("snat_config: max allocations (%d) reached for pod %s", len(val.Allocations), podIP)
+		if val.Count >= uint32(len(val.PortRangeAllocs)) {
+			return fmt.Errorf("nat_config: max allocations (%d) reached for pod %s", len(val.PortRangeAllocs), podIP)
 		}
 		idx := val.Count
-		val.Allocations[idx].ExtIp = extIPVal
-		val.Allocations[idx].PortStart = portStart
-		val.Allocations[idx].PortEnd = portEnd
-		val.Allocations[idx].NextPort = 0
+		val.PortRangeAllocs[idx].ExtIp = extIPVal
+		val.PortRangeAllocs[idx].PortStart = portStart
+		val.PortRangeAllocs[idx].PortEnd = portEnd
 		val.Count++
 	}
 
@@ -209,11 +207,12 @@ func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) e
 	return nil
 }
 
-// RemoveSnatAllocs removes the snat_config allocations for the given extIPs
-// from the (podIP, targetCIDR) entry. Slots for ext-IPs not in the list are
-// left intact. If all allocations are removed, the entry is deleted entirely.
-func RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
-	m, err := openMap("snat_config")
+// RemoveNatConfigAllocs removes the nat_config allocations for the given
+// extIPs from the (podIP, targetCIDR) entry. Slots for ext-IPs not in the
+// list are left intact. If all allocations are removed, the entry is deleted
+// entirely.
+func RemoveNatConfigAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
+	m, err := openMap("nat_config")
 	if err != nil {
 		return err
 	}
@@ -224,18 +223,18 @@ func RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) erro
 	if cidrIP4 == nil {
 		return fmt.Errorf("only IPv4 target CIDRs are supported")
 	}
-	key := mooringbpf.SnatEgressSnatConfigKey{
+	key := mooringbpf.SnatEgressNatConfigKey{
 		PodIp:         ipToUint32(podIP.To4()),
 		CidrAddr:      ipToUint32(cidrIP4),
 		CidrPrefixlen: uint32(ones),
 	}
 
-	var val mooringbpf.SnatEgressSnatConfigVal
+	var val mooringbpf.SnatEgressNatConfigVal
 	if err := m.Lookup(key, &val); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
 			return nil
 		}
-		return fmt.Errorf("lookup snat_config for %s/%s: %w", podIP, targetCIDR, err)
+		return fmt.Errorf("lookup nat_config for %s/%s: %w", podIP, targetCIDR, err)
 	}
 
 	toRemove := make(map[uint32]struct{}, len(extIPs))
@@ -245,26 +244,25 @@ func RemoveSnatAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) erro
 
 	newCount := uint32(0)
 	for i := uint32(0); i < val.Count; i++ {
-		if _, ok := toRemove[val.Allocations[i].ExtIp]; ok {
+		if _, ok := toRemove[val.PortRangeAllocs[i].ExtIp]; ok {
 			continue
 		}
-		val.Allocations[newCount] = val.Allocations[i]
+		val.PortRangeAllocs[newCount] = val.PortRangeAllocs[i]
 		newCount++
 	}
 	if newCount == val.Count {
 		return nil
 	}
 	for i := newCount; i < val.Count; i++ {
-		val.Allocations[i].ExtIp = 0
-		val.Allocations[i].PortStart = 0
-		val.Allocations[i].PortEnd = 0
-		val.Allocations[i].NextPort = 0
+		val.PortRangeAllocs[i].ExtIp = 0
+		val.PortRangeAllocs[i].PortStart = 0
+		val.PortRangeAllocs[i].PortEnd = 0
 	}
 	val.Count = newCount
 
 	if newCount == 0 {
 		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete snat_config for %s/%s: %w", podIP, targetCIDR, err)
+			return fmt.Errorf("delete nat_config for %s/%s: %w", podIP, targetCIDR, err)
 		}
 		return nil
 	}

@@ -63,23 +63,16 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
   if ((void *)(iph + 1) > data_end)
     return TCX_NEXT;
 
-  // look up nat_table to see if the pod is local
-  struct nat_key nk = {
-      .pod_ip = iph->daddr,
-      .server_ip = iph->saddr,
-      .nat_port = nat_port,
-      .server_port = server_port,
+  // look up the revnat entry in nat_map to see if the pod is local
+  struct nat_map_key revnat_key = {
+      .ip_a = iph->saddr, // server_ip
+      .ip_b = iph->daddr, // pod_ip
+      .port_a = server_port,
+      .port_b = nat_port,
+      .proto = iph->protocol,
+      .kind = NAT_ENTRY_REVNAT,
   };
-  struct nat_val *nv;
-
-  // look up per protocol NAT tables (TCP & UDP for now)
-  if (iph->protocol == IPPROTO_TCP) {
-    nv = bpf_map_lookup_elem(&nat_table_tcp, &nk);
-  } else if (iph->protocol == IPPROTO_UDP) {
-    nv = bpf_map_lookup_elem(&nat_table_udp, &nk);
-  } else { // ICMP
-    nv = bpf_map_lookup_elem(&nat_table_icmp, &nk);
-  }
+  struct nat_map_val *nv = bpf_map_lookup_elem(&nat_map, &revnat_key);
   if (!nv) {
     bpf_printk("revnat: stage2 not-local ifindex=%u src=%x dst=%x port=%u\n",
                skb->ifindex, bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
@@ -89,7 +82,7 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
     return bpf_redirect_neigh(skb->ifindex, NULL, 0, 0);
   }
 
-  __be16 pod_port = nv->pod_port;
+  __be16 pod_port = nv->port;
 
   // rewrite headers before csum helper (bpf_l4_csum_replace calls
   // skb_make_writable, which can invalidate PTR_TO_PACKET registers)
@@ -97,6 +90,36 @@ static __always_inline int do_port_revnat(struct __sk_buff *skb,
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
       return TCX_NEXT;
+
+    // Mirror of the connection tracking in snat_egress.c, for the
+    // server->pod direction (a server-initiated FIN/RST, or the server's
+    // ACK confirming a pod-initiated close, never appears on the egress
+    // path). See snat_egress.c's try_alloc_port for the matching stale-entry
+    // reclaim during allocation.
+    struct nat_map_key snat_key = {
+        .ip_a = revnat_key.ip_b, // pod_ip
+        .ip_b = revnat_key.ip_a, // server_ip
+        .port_a = pod_port,
+        .port_b = revnat_key.port_a, // server_port
+        .proto = IPPROTO_TCP,
+        .kind = NAT_ENTRY_SNAT,
+    };
+    if (nv->closing_ns) {
+      // See snat_egress.c for why this requires a second FIN/RST rather than
+      // a plain ACK (half-closed connections would otherwise be torn down
+      // while one direction is still flowing).
+      if ((tcph->fin || tcph->rst) && tcph->ack) {
+        bpf_map_delete_elem(&nat_map, &revnat_key);
+        bpf_map_delete_elem(&nat_map, &snat_key);
+      }
+    } else if (tcph->fin || tcph->rst) {
+      __u64 now = bpf_ktime_get_ns();
+      nv->closing_ns = now;
+      struct nat_map_val *sv = bpf_map_lookup_elem(&nat_map, &snat_key);
+      if (sv)
+        sv->closing_ns = now;
+    }
+
     tcph->dest = pod_port;
   } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);

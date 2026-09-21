@@ -25,10 +25,10 @@ type PortRangeLookupMap interface {
 	Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error
 }
 
-// SnatConfigMap abstracts the snat_config BPF map.
+// NatConfigMap abstracts the nat_config BPF map.
 // Each entry is keyed by (podIP, targetCIDR) and holds all external-IP allocations
 // for that (pod, target-CIDR) pair.
-type SnatConfigMap interface {
+type NatConfigMap interface {
 	Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error
 	RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error
 }
@@ -56,13 +56,13 @@ func (RealPortRangeLookupMap) Remove(extIP, podIP net.IP, portStart, portEnd uin
 	return maps.RemovePortRange(extIP, podIP, portStart, portEnd, proto)
 }
 
-// RealSnatConfigMap is the production implementation of SnatConfigMap.
-type RealSnatConfigMap struct{}
+// RealNatConfigMap is the production implementation of NatConfigMap.
+type RealNatConfigMap struct{}
 
-func (RealSnatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
-	return maps.UpsertSnatEntry(podIP, targetCIDR, extIP, portStart, portEnd)
+func (RealNatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
+	return maps.UpsertNatConfigEntry(podIP, targetCIDR, extIP, portStart, portEnd)
 }
 
-func (RealSnatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
-	return maps.RemoveSnatAllocs(podIP, targetCIDR, extIPs)
+func (RealNatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
+	return maps.RemoveNatConfigAllocs(podIP, targetCIDR, extIPs)
 }

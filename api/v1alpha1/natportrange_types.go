@@ -17,7 +17,7 @@ type NATPortRangeSpec struct {
 	NodeName     string `json:"nodeName"`
 	NATConfig    string `json:"natConfig"`
 	// TargetCIDRs mirrors NATConfig.Spec.TargetCIDRs so the daemon sync
-	// controller can key snat_config entries by (podIP, targetCIDR) without
+	// controller can key nat_config entries by (podIP, targetCIDR) without
 	// fetching the NATConfig on every reconcile.
 	TargetCIDRs []string `json:"targetCIDRs"`
 	// PortRangeCount mirrors NATPortRangeRequest.Spec.PortRangeCount so the
