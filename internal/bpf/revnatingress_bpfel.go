@@ -19,17 +19,23 @@ type RevnatIngressLpmKey struct {
 	Addr      uint32
 }
 
-type RevnatIngressNatKey struct {
-	_          structs.HostLayout
-	PodIp      uint32
-	ServerIp   uint32
-	NatPort    uint16
-	ServerPort uint16
+type RevnatIngressNatMapKey struct {
+	_     structs.HostLayout
+	IpA   uint32
+	IpB   uint32
+	PortA uint16
+	PortB uint16
+	Proto uint8
+	Kind  uint8
+	_     [2]byte
 }
 
-type RevnatIngressNatVal struct {
-	_       structs.HostLayout
-	PodPort uint16
+type RevnatIngressNatMapVal struct {
+	_         structs.HostLayout
+	NatIp     uint32
+	Port      uint16
+	_         [2]byte
+	ClosingNs uint64
 }
 
 type RevnatIngressTargetCidrVal struct {
@@ -43,9 +49,7 @@ type RevnatIngressTargetCidrVal struct {
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	RevnatIngressMapExtIpPool           = "ext_ip_pool"
-	RevnatIngressMapNatTableIcmp        = "nat_table_icmp"
-	RevnatIngressMapNatTableTcp         = "nat_table_tcp"
-	RevnatIngressMapNatTableUdp         = "nat_table_udp"
+	RevnatIngressMapNatMap              = "nat_map"
 	RevnatIngressMapPortRangeInner      = "port_range_inner"
 	RevnatIngressMapPortRangeLookupIcmp = "port_range_lookup_icmp"
 	RevnatIngressMapPortRangeLookupTcp  = "port_range_lookup_tcp"
@@ -104,9 +108,7 @@ type RevnatIngressProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type RevnatIngressMapSpecs struct {
 	ExtIpPool           *ebpf.MapSpec `ebpf:"ext_ip_pool"`
-	NatTableIcmp        *ebpf.MapSpec `ebpf:"nat_table_icmp"`
-	NatTableTcp         *ebpf.MapSpec `ebpf:"nat_table_tcp"`
-	NatTableUdp         *ebpf.MapSpec `ebpf:"nat_table_udp"`
+	NatMap              *ebpf.MapSpec `ebpf:"nat_map"`
 	PortRangeInner      *ebpf.MapSpec `ebpf:"port_range_inner"`
 	PortRangeLookupIcmp *ebpf.MapSpec `ebpf:"port_range_lookup_icmp"`
 	PortRangeLookupTcp  *ebpf.MapSpec `ebpf:"port_range_lookup_tcp"`
@@ -140,9 +142,7 @@ func (o *RevnatIngressObjects) Close() error {
 // It can be passed to LoadRevnatIngressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type RevnatIngressMaps struct {
 	ExtIpPool           *ebpf.Map `ebpf:"ext_ip_pool"`
-	NatTableIcmp        *ebpf.Map `ebpf:"nat_table_icmp"`
-	NatTableTcp         *ebpf.Map `ebpf:"nat_table_tcp"`
-	NatTableUdp         *ebpf.Map `ebpf:"nat_table_udp"`
+	NatMap              *ebpf.Map `ebpf:"nat_map"`
 	PortRangeInner      *ebpf.Map `ebpf:"port_range_inner"`
 	PortRangeLookupIcmp *ebpf.Map `ebpf:"port_range_lookup_icmp"`
 	PortRangeLookupTcp  *ebpf.Map `ebpf:"port_range_lookup_tcp"`
@@ -153,9 +153,7 @@ type RevnatIngressMaps struct {
 func (m *RevnatIngressMaps) Close() error {
 	return _RevnatIngressClose(
 		m.ExtIpPool,
-		m.NatTableIcmp,
-		m.NatTableTcp,
-		m.NatTableUdp,
+		m.NatMap,
 		m.PortRangeInner,
 		m.PortRangeLookupIcmp,
 		m.PortRangeLookupTcp,

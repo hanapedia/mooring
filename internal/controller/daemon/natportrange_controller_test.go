@@ -10,7 +10,7 @@ import (
 )
 
 // testTargetCIDR is the target CIDR embedded in all NPRs created by makeNPR.
-// Tests that check snat_config calls can assert against this value.
+// Tests that check nat_config calls can assert against this value.
 const testTargetCIDR = "10.99.0.0/24"
 
 func makeNPR(name, nodeName, podIP, extIP string, portStart, portEnd int32) *v1alpha1.NATPortRange {
@@ -62,18 +62,18 @@ var _ = Describe("NATPortRange sync controller", func() {
 			}
 		})
 
-		It("calls UpsertSnatEntry for a local-node NPR", func() {
+		It("calls UpsertNatConfigEntry for a local-node NPR", func() {
 			extIP := "203.0.115.2"
 			podIP := "10.244.4.11"
 			npr := makeNPR(uniqueName("npr"), testNodeName, podIP, extIP, 1100, 1199)
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool {
-				return mockSnatConfig.hasUpserted(podIP, extIP)
+				return mockNatConfig.hasUpserted(podIP, extIP)
 			})
 		})
 
-		It("calls AddPortRange but not UpsertSnatEntry for a remote-node NPR", func() {
+		It("calls AddPortRange but not UpsertNatConfigEntry for a remote-node NPR", func() {
 			extIP := "203.0.115.3"
 			podIP := "10.244.4.12"
 			var portStart, portEnd uint16 = 1200, 1299
@@ -83,15 +83,15 @@ var _ = Describe("NATPortRange sync controller", func() {
 			eventually(func() bool {
 				return mockPortRangeLookup.hasAdded(extIP, podIP, portStart, portEnd, 6)
 			})
-			// Give the reconciler time to potentially (incorrectly) call UpsertSnat.
+			// Give the reconciler time to potentially (incorrectly) call Upsert.
 			consistently(func() bool {
-				return !mockSnatConfig.hasUpserted(podIP, extIP)
+				return !mockNatConfig.hasUpserted(podIP, extIP)
 			})
 		})
 	})
 
 	Describe("BPF cleanup on NPR stale", func() {
-		It("cleans up port_range_lookup and snat_config when StaleSince is set on a local-node NPR", func() {
+		It("cleans up port_range_lookup and nat_config when StaleSince is set on a local-node NPR", func() {
 			extIP := "203.0.115.4"
 			podIP := "10.244.4.20"
 			var portStart, portEnd uint16 = 1300, 1399
@@ -113,11 +113,11 @@ var _ = Describe("NATPortRange sync controller", func() {
 				})
 			}
 			eventually(func() bool {
-				return mockSnatConfig.hasRemoved(podIP)
+				return mockNatConfig.hasRemoved(podIP)
 			})
 		})
 
-		It("cleans up port_range_lookup but not snat_config for a remote-node NPR", func() {
+		It("cleans up port_range_lookup but not nat_config for a remote-node NPR", func() {
 			extIP := "203.0.115.5"
 			podIP := "10.244.4.21"
 			var portStart, portEnd uint16 = 1400, 1499
@@ -138,7 +138,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 				})
 			}
 			consistently(func() bool {
-				return !mockSnatConfig.hasRemoved(podIP)
+				return !mockNatConfig.hasRemoved(podIP)
 			})
 		})
 	})

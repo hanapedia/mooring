@@ -43,7 +43,7 @@ var (
 	mockTargetCIDR      *recordingTargetCIDRMap
 	mockExtIPPool       *recordingExtIPPoolMap
 	mockPortRangeLookup *recordingPortRangeLookupMap
-	mockSnatConfig      *recordingSnatConfigMap
+	mockNatConfig       *recordingNatConfigMap
 	mockRouteAdvertiser *recordingRouteAdvertiser
 )
 
@@ -82,7 +82,7 @@ var _ = BeforeSuite(func() {
 	mockTargetCIDR = &recordingTargetCIDRMap{}
 	mockExtIPPool = &recordingExtIPPoolMap{}
 	mockPortRangeLookup = &recordingPortRangeLookupMap{}
-	mockSnatConfig = &recordingSnatConfigMap{}
+	mockNatConfig = &recordingNatConfigMap{}
 	mockRouteAdvertiser = &recordingRouteAdvertiser{}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -118,7 +118,7 @@ var _ = BeforeSuite(func() {
 
 	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), testNodeName, mockTargetCIDR, mockExtIPPool, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockSnatConfig).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockNatConfig).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()
@@ -304,31 +304,31 @@ func (m *recordingPortRangeLookupMap) hasRemoved(extIP, podIP string, portStart,
 }
 
 type (
-	snatCall       struct{ podIP, extIP, targetCIDR string }
-	removeSnatCall struct{ podIP, targetCIDR string }
+	natCall       struct{ podIP, extIP, targetCIDR string }
+	removeNatCall struct{ podIP, targetCIDR string }
 )
 
-type recordingSnatConfigMap struct {
+type recordingNatConfigMap struct {
 	mu          sync.Mutex
-	upsertCalls []snatCall
-	removeCalls []removeSnatCall
+	upsertCalls []natCall
+	removeCalls []removeNatCall
 }
 
-func (m *recordingSnatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
+func (m *recordingNatConfigMap) Upsert(podIP net.IP, targetCIDR *net.IPNet, extIP net.IP, portStart, portEnd uint16) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.upsertCalls = append(m.upsertCalls, snatCall{podIP.String(), extIP.String(), targetCIDR.String()})
+	m.upsertCalls = append(m.upsertCalls, natCall{podIP.String(), extIP.String(), targetCIDR.String()})
 	return nil
 }
 
-func (m *recordingSnatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
+func (m *recordingNatConfigMap) RemoveAllocs(podIP net.IP, targetCIDR *net.IPNet, extIPs []net.IP) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.removeCalls = append(m.removeCalls, removeSnatCall{podIP.String(), targetCIDR.String()})
+	m.removeCalls = append(m.removeCalls, removeNatCall{podIP.String(), targetCIDR.String()})
 	return nil
 }
 
-func (m *recordingSnatConfigMap) hasUpserted(podIP, extIP string) bool {
+func (m *recordingNatConfigMap) hasUpserted(podIP, extIP string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, c := range m.upsertCalls {
@@ -339,7 +339,7 @@ func (m *recordingSnatConfigMap) hasUpserted(podIP, extIP string) bool {
 	return false
 }
 
-func (m *recordingSnatConfigMap) hasRemoved(podIP string) bool {
+func (m *recordingNatConfigMap) hasRemoved(podIP string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, c := range m.removeCalls {

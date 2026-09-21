@@ -67,12 +67,12 @@ management is required.
 | TCX egress (head) | node uplink | egress | Outbound SNAT |
 | TCX ingress (head) | node uplink | ingress | Combined stage 1 + 2 revNAT |
 
-The egress program matches outbound packets by looking up the source pod IP in the SNAT config
+The egress program matches outbound packets by looking up the source pod IP in the nat_config
 map. The ingress program handles both revNAT stages in a single pass:
 
 - If the destination is a known external IP, it performs stage 1 (IP revNAT) and then attempts
-  stage 2 immediately — the **same-node optimization** succeeds when the NAT table has an entry
-  for the pod (i.e., the pod is local). If the NAT table misses, the packet is forwarded by BGP
+  stage 2 immediately — the **same-node optimization** succeeds when `nat_map` has a revnat entry
+  for the pod (i.e., the pod is local). If it misses, the packet is forwarded by BGP
   to the pod's node where the uplink ingress program there handles stage 2.
 - If the destination is already a pod IP (cross-node: stage 1 ran on another node), stage 2 is
   performed directly.
@@ -122,11 +122,12 @@ target; the default mode is the reference implementation.
 
 ### Problem
 
-The stage 2 NAT table is keyed on `{pod-IP, NAT-port, server-IP, server-port}`. The external IP
-is absent from this key because stage 1 has already overwritten the packet destination by the time
-stage 2 runs. If the same NAT port were assigned to the same pod across two different external IPs,
-two distinct connections to the same server could produce identical keys — causing one to overwrite
-the other in the NAT table and breaking that connection.
+The stage 2 lookup (a revnat entry in `nat_map`, see [BPF Maps](#bpf-maps)) is keyed on
+`{server-IP, server-port, pod-IP, NAT-port, proto}`. The external IP is absent from this key because
+stage 1 has already overwritten the packet destination by the time stage 2 runs. If the same NAT
+port were assigned to the same pod across two different external IPs, two distinct connections to
+the same server could produce identical keys — causing one to overwrite the other and breaking that
+connection.
 
 ### Solution: fixed-size blocks with per-IP free sets
 
@@ -274,17 +275,41 @@ status:
 
 ## BPF Maps
 
-### NAT table (per node, outbound node only)
+### nat_map (per node, outbound node only)
 
-Keyed on the return packet's headers as they arrive at the client node after stage 1 revNAT.
+A single map holds both directions of every tracked connection — the forward (snat) entry the
+egress program uses to reuse or allocate a port, and the reverse (revnat) entry the ingress program
+uses to restore the original pod port. A live connection always occupies exactly one of each:
 
-| Field | Role |
-|---|---|
-| Key: `{pod-IP, NAT-port, server-IP, server-port, proto}` | Uniquely identifies a connection |
-| Value: `{pod-port}` | Original source port to restore |
+| Entry | Key | Value |
+|---|---|---|
+| snat   | `{pod-IP, pod-port, server-IP, server-port, proto, kind=SNAT}`   | `{ext-IP, NAT-port, closing_ns}` |
+| revnat | `{server-IP, server-port, pod-IP, NAT-port, proto, kind=REVNAT}` | `{ext-IP, pod-port, closing_ns}` |
 
-Type: `BPF_MAP_TYPE_LRU_HASH`. Entries are evicted when the map is full; TTL-based cleanup is
-performed by the daemon for closed connections.
+Both entries share one generic key shape (`ip_a, ip_b, port_a, port_b, proto, kind`) and one generic
+value shape (`nat_ip, port, closing_ns`) — `port` means NAT-port on a snat entry and pod-port on a
+revnat entry. `kind` exists purely so the two entry shapes can never collide: without it, a snat key
+and a revnat key draw from the same `(IP, port, IP, port, proto)` domain, so one flow's forward key
+could in principle coincide with a different flow's reverse key (e.g. if some server's own
+`IP:port` happened to equal another flow's `pod-IP:NAT-port`). With `kind` in the key, that's
+structurally impossible rather than merely unlikely.
+
+Both `snat_egress` and `revnat_ingress` read and write this same map (`revnat_ingress` needs the
+snat side too, for connection tracking on the server→pod direction — see "Connection tracking and
+port reclamation" below), so it's shared between the two programs the same way `target_cidrs` is.
+
+Type: `BPF_MAP_TYPE_LRU_HASH`, `max_entries = 131072`. Sized as `2 × 65536`: every connection holds
+exactly one snat and one revnat entry, and 65536 concurrent connections matches what this map
+replaced. (An earlier design used three separate 65536-entry per-protocol NAT tables for the revnat
+side plus one more 65536-entry map for the forward/session side — nominally 4×65536 capacity, but
+the forward map was never itself split per protocol, so it was already the binding constraint at
+65536 total connections regardless of protocol mix; the per-protocol split on the reverse side never
+actually bought extra capacity in practice. `nat_map` makes that honest with one map sized for the
+capacity that was actually reachable.) Entries are evicted under global map pressure regardless of
+protocol or direction — this was already true of the old forward/session map, which was never
+protocol-split either; unifying doesn't reduce isolation that existed before. For TCP, entries are
+additionally removed proactively — see "Connection tracking and port reclamation" below. UDP and
+ICMP entries are never proactively removed; LRU eviction is their only cleanup path.
 
 ### Port-range lookup map (all nodes)
 
@@ -301,18 +326,97 @@ Implemented as three `BPF_MAP_TYPE_HASH_OF_MAPS` maps (one per IP protocol: TCP,
 
 Each daemon syncs all `NATPortRange` resources into these maps regardless of node ownership, because any node can be the stage 1 revNAT node for a given return packet.
 
-### SNAT config map (per node, outbound node only)
+### nat_config map (per node, outbound node only)
 
 Provides the outbound BPF program with the port ranges for each local client pod, scoped per target CIDR.
 
 | Field | Role |
 |---|---|
 | Key: `{pod-IP, cidr-addr, cidr-prefixlen}` | Client pod + matched target CIDR |
-| Value: `[{externalIP, portStart, portEnd, nextPort}, ...]` | All allocated ranges for that (pod, target-CIDR) pair; `nextPort` is an atomic counter for port selection |
+| Value: `[{externalIP, portStart, portEnd}, ...]` | All allocated ranges for that (pod, target-CIDR) pair |
 
 Type: `BPF_MAP_TYPE_HASH`, `max_entries = 65536`. Updated by the daemon when `NATPortRange` resources change.
 
-The compound key is necessary because a pod may match multiple NATConfigs with different target CIDRs — each target CIDR implies a distinct external IP pool. Keying by `(pod-IP, target-CIDR)` lets the egress program pick the correct ext-IP pool based on which CIDR the packet's destination fell into. As a side effect, each `(pod, target-CIDR)` entry has an independent set of `nextPort` counters, so the usable ports per (pod, target-CIDR) pair is the full range size rather than a fraction shared across pools.
+The compound key is necessary because a pod may match multiple NATConfigs with different target CIDRs — each target CIDR implies a distinct external IP pool. Keying by `(pod-IP, target-CIDR)` lets the egress program pick the correct ext-IP pool based on which CIDR the packet's destination fell into. As a side effect, each `(pod, target-CIDR)` entry has an independent port-allocation state, so the usable ports per (pod, target-CIDR) pair is the full range size rather than a fraction shared across pools.
+
+### Port allocation within a block (egress node)
+
+Each `{externalIP, portStart, portEnd}` entry has no free list and no counter — the range's size
+(`portEnd - portStart + 1`) is all the state that's needed. On a new connection, the egress program
+picks one entry (see "picking an entry" below), then within it picks a starting port via
+`clamp_to_range(port_start, port_end, seed)` — a fixed-point projection of a 16-bit seed onto
+`[port_start, port_end]` (`start + (seed * range) >> 16`), the same technique Cilium's `bpf_nat.h`
+uses for SNAT port selection. The seed is the connection's own pod-side port (TCP/UDP source port,
+or the ICMP echo id), so port selection is deterministic per flow rather than drawing from
+`bpf_get_prandom_u32()` — cheaper (a multiply and a shift instead of a helper call plus a modulo by
+a non-constant divisor) and harmless to determinize, since a "collision" is scoped to the full
+`(pod-IP, port, server-IP, server-port)` tuple: two flows from the same pod-side port to *different*
+destinations landing on the same starting port were never going to collide with each other anyway.
+
+- **ICMP**: uses the seeded port unconditionally, overwriting whatever was there. Echo-id collisions
+  are cheap and short-lived, so no collision checking is done at all.
+- **TCP/UDP**: probes up to a fixed number of attempts (`MAX_PORT_ATTEMPTS`) starting from the seeded
+  port, stepping linearly on collision. A "collision" means a revnat entry already exists in
+  `nat_map` for that exact `(server-IP, server-port, pod-IP, candidate-port, proto)` tuple. If
+  every attempt collides, that entry is exhausted for this connection and the egress program samples
+  another one of the pod's entries (see below); if none of the sampled entries have room, the new
+  connection fails (no SNAT applied) rather than forcing an allocation.
+
+Picking *which* entry to try when a pod has more than one (multiple external IPs) is
+`MAX_ENTRY_ATTEMPTS` independent samples (with replacement) from `cv->port_range_allocs[0..count-1]`,
+trying each until one succeeds, via `clamp_to_range(0, count-1, pod_port + attempt)` — the same
+fixed-point projection as port selection, just onto `[0, count-1]` instead of `[port_start,
+port_end]` (`clamp_to_range` with `start = 0`). Folding the entry-attempt index into the seed is
+what keeps a with-replacement resample of the same entry from recomputing the identical index and, in
+turn, the identical starting port and already-failed probe sequence.
+
+This removes `bpf_get_prandom_u32()` from the allocation path entirely (an earlier version used
+`bpf_get_prandom_u32() % count` here) and, unlike that modulo, needs no defensive clamp or
+compiler-barrier workaround: multiply-by-a-runtime-value followed by a constant shift is a shape the
+verifier's own scalar range tracking bounds directly (confirmed by an actual `bpftool prog load`
+against a real kernel), whereas `%` by a non-constant divisor gets no tracked bound at all — the
+`bpf_get_prandom_u32() % count` version needed an explicit `if (idx >= MAX_PORT_RANGE_ALLOCS) idx = 0`
+clamp wrapped in a compiler barrier (`asm volatile("" : "+r"(idx))`) just to give the verifier
+something to prove `cv->port_range_allocs[idx]` safe against; without the barrier, clang's own optimizer
+proved the clamp redundant and deleted it, leaving nothing for the verifier to check.
+
+This is still deliberately **not** an exhaustive scan of every entry: an early version tried a random
+pick first and only fell back to a fixed-order scan of every remaining entry (up to `MAX_PORT_RANGE_ALLOCS`
+= 256) when that one was exhausted, and that fixed-order fallback loop — wrapping the port-probe loop
+above, replicated per protocol — was enough nested branching (a map lookup plus several conditionals
+per inner iteration, times up to 256 outer iterations, times 3 protocols) to blow the kernel
+verifier's fixed 1,000,000-instruction processing budget outright (confirmed by an actual load
+failure: `argument list too long: BPF program is too large. Processed 1000001 insn`). Sampling with a
+small fixed attempt count sidesteps this because the loop bound is a compile-time constant unrelated
+to `cv->count` or `MAX_PORT_RANGE_ALLOCS`, at the cost of no longer being exhaustive — a pod whose block is
+nearly full can occasionally fail an allocation that would have succeeded against an entry that was
+never sampled. `MAX_PORT_RANGE_ALLOCS` still bounds the `port_range_allocs[]` array's storage capacity, it just no
+longer drives loop iteration count.
+
+### Connection tracking and port reclamation
+
+Because allocation is now collision-driven rather than a one-way counter, a NAT port can be reused
+as soon as the table says the old connection is gone. For TCP, this is done actively:
+
+- Both the egress program (pod→server packets) and the ingress program's stage 2 (server→pod
+  packets) inspect TCP flags on every packet of a known flow.
+- The first FIN or RST seen (either direction) stamps `closing_ns = bpf_ktime_get_ns()` on both the
+  connection's snat entry and its paired revnat entry in `nat_map`.
+- A **second** FIN or RST seen afterward (either direction, combined with ACK) confirms the close
+  and deletes both entries immediately. Requiring a second terminating segment — rather than any
+  ACK — specifically avoids tearing down a half-closed connection (one side FIN'd, the other still
+  sending data) onto a fresh port mid-flow.
+- If the close is never confirmed (crash, dropped FIN/RST, network partition), the entries are left
+  in place — not evicted proactively — but become eligible for reclamation: a later allocation whose
+  collision check (against the revnat entry) finds one marked `closing` for longer than
+  `NAT_CLOSING_STALE_NS` (10s) treats it as free, reclaiming the port and deleting the stale snat
+  entry (the stale revnat entry is overwritten naturally once the new allocation writes to that same
+  key). An entry that was never marked `closing` at all is never reclaimed this way, no matter how
+  old — only LRU eviction of the whole map applies to it.
+
+UDP and ICMP entries never get marked `closing` (there's no equivalent signal), so they're never
+reclaimed by this mechanism — LRU eviction of the whole map is their only cleanup path, same as
+before this change.
 
 ### Target CIDRs map
 
@@ -323,7 +427,7 @@ LPM trie keyed on destination IP; hit means the packet is a candidate for SNAT.
 | Key: `{prefixlen, addr}` | Network CIDR |
 | Value: `{addr, prefixlen}` | The matching entry's own network address and prefix length |
 
-Type: `BPF_MAP_TYPE_LPM_TRIE`. The value stores the CIDR identity redundantly so the egress program can recover _which_ CIDR matched from the lookup result (BPF LPM returns the value of the matching entry, not its key) and construct the `snat_config` compound key.
+Type: `BPF_MAP_TYPE_LPM_TRIE`. The value stores the CIDR identity redundantly so the egress program can recover _which_ CIDR matched from the lookup result (BPF LPM returns the value of the matching entry, not its key) and construct the `nat_config` compound key.
 
 ---
 
@@ -340,8 +444,9 @@ client pod
   ▼
 TCX egress (head) — node uplink  (all nodes; filtered by target_cidrs LPM lookup)
   │  looks up dst in target_cidrs LPM → matched CIDR {cidr-addr, cidr-prefixlen} (or miss → pass)
-  │  looks up (pod-IP, cidr-addr, cidr-prefixlen) in snat_config → selects externalIP + allocates NAT-port
-  │  writes NAT table: {pod-IP, NAT-port, server-IP, server-port} → {pod-port}
+  │  looks up (pod-IP, cidr-addr, cidr-prefixlen) in nat_config → selects externalIP + allocates NAT-port
+  │  writes nat_map snat entry:   {pod-IP, pod-port, server-IP, server-port}   → {externalIP, NAT-port}
+  │  writes nat_map revnat entry: {server-IP, server-port, pod-IP, NAT-port}   → {externalIP, pod-port}
   │  SNATs src: pod-IP:pod-port → externalIP:NAT-port
   ▼
 BGP routing
@@ -366,13 +471,13 @@ TCX ingress (head) — node uplink  (combined stage 1+2 revNAT, all nodes)
   │    looks up port-range-map[externalIP][NAT-port] → pod-IP
   │    rewrites dst: externalIP → pod-IP
   │    attempts Stage 2 (same-node optimization):
-  │      NAT table hit  → rewrites dst-port: NAT-port → pod-port
-  │                     → client pod ✓
-  │      NAT table miss → pod is on another node
-  │                     → BGP routes pod-IP packet to pod's node → [case B]
+  │      nat_map revnat hit  → rewrites dst-port: NAT-port → pod-port
+  │                          → client pod ✓
+  │      nat_map revnat miss → pod is on another node
+  │                          → BGP routes pod-IP packet to pod's node → [case B]
   │
   │  [case B] dst ∈ pod CIDR  → Stage 2 (cross-node return)
-  │    looks up NAT table: {pod-IP, NAT-port, server-IP, server-port} → {pod-port}
+  │    looks up nat_map revnat entry: {server-IP, server-port, pod-IP, NAT-port} → {externalIP, pod-port}
   │    rewrites dst-port: NAT-port → pod-port
   ▼
 client pod  (src=server-IP:server-port, dst=pod-IP:pod-port ✓)
@@ -555,13 +660,13 @@ of each NPR re-adds all current allocations, idempotently repopulating the maps 
 first successful `syncAlive`. It prevents Kubernetes from fully deleting the NPR until
 `syncDeleted` has finished cleaning up BPF maps and explicitly removed the finalizer. Without
 this, a daemon restart between the GC deleting the NPR and the daemon running `syncDeleted` would
-leave stale port-range and snat_config entries in BPF maps indefinitely. `IsNotFound` in `Reconcile`
+leave stale port-range and nat_config entries in BPF maps indefinitely. `IsNotFound` in `Reconcile`
 therefore always means "this daemon never synced the NPR" and requires no BPF action.
 
 - **DeletionTimestamp set**: removes all entries in `spec.Allocations` from
   `port_range_lookup_{tcp,udp,icmp}` (all nodes). If `spec.nodeName == NODE_NAME`, iterates
-  `spec.TargetCIDRs` and calls `RemoveSnatAllocs(podIP, cidr, uniqueExtIPs)` for each target CIDR
-  to remove that pod's `snat_config` entries, leaving allocations from other pods intact. Removes
+  `spec.TargetCIDRs` and calls `RemoveNatConfigAllocs(podIP, cidr, uniqueExtIPs)` for each target CIDR
+  to remove that pod's `nat_config` entries, leaving allocations from other pods intact. Removes
   the `mooring.hanapedia.link/bpf-sync` finalizer, then clears the cache entry.
 - **No DeletionTimestamp**: computes a minimal diff across two dimensions:
   - *Allocation diff* (`toRemove`, `toAdd`): from `spec.Allocations` vs cached allocations.
@@ -569,14 +674,14 @@ therefore always means "this daemon never synced the NPR" and requires no BPF ac
     vs cached CIDRs.
 
   Applies `RemovePortRange` / `AddPortRange` (TCP, UDP, ICMP) for changed allocations (all nodes).
-  If local node, drives `snat_config` updates:
+  If local node, drives `nat_config` updates:
 
   | Changed dimension | Action |
   |---|---|
-  | Allocation removed, CIDR unchanged | `RemoveSnatAllocs(podIP, cidr, removedExtIPs)` for each common CIDR |
-  | Allocation added, CIDR unchanged | `UpsertSnatEntry(podIP, cidr, extIP, ...)` for each common CIDR |
-  | CIDR removed entirely | `RemoveSnatAllocs(podIP, cidr, allOldExtIPs)` |
-  | CIDR added | `UpsertSnatEntry(podIP, cidr, extIP, ...)` for all current allocations |
+  | Allocation removed, CIDR unchanged | `RemoveNatConfigAllocs(podIP, cidr, removedExtIPs)` for each common CIDR |
+  | Allocation added, CIDR unchanged | `UpsertNatConfigEntry(podIP, cidr, extIP, ...)` for each common CIDR |
+  | CIDR removed entirely | `RemoveNatConfigAllocs(podIP, cidr, allOldExtIPs)` |
+  | CIDR added | `UpsertNatConfigEntry(podIP, cidr, extIP, ...)` for all current allocations |
 
   Updates the cache entry with the new `{TargetCIDRs, Allocations}` state.
 
@@ -620,7 +725,7 @@ provided for unit tests and envtest.
    with an owner reference back to the request.
 4. Daemons on every node see the new `NATPortRange` and sync its allocations into the
    per-protocol port-range lookup maps.
-5. Daemon on the pod's node additionally syncs the allocation into the SNAT config map. No BPF
+5. Daemon on the pod's node additionally syncs the allocation into the nat_config map. No BPF
    program attachment is needed in default mode — the uplink programs are already running.
 6. Pod is marked ready.
 
@@ -662,10 +767,12 @@ cleanup via the grace period mechanism.
 ## Limitations
 
 - **Max concurrent connections per pod per (external IP, target CIDR)** is bounded by the assigned
-  port range size. Each `(pod, target-CIDR)` pair has its own independent `nextPort` counters, so
-  a pod matching N target CIDRs effectively multiplies its available NAT capacity by N. Pods with
-  high connection churn should use a dedicated NATConfig with a larger `portRangeSize` or finer
-  target CIDR splits.
+  port range size — this bounds concurrency, not lifetime churn, since ports are reclaimed as TCP
+  connections close (see "Connection tracking and port reclamation" above) rather than being
+  consumed once and never reused. Each `(pod, target-CIDR)` pair has its own independent port
+  space, so a pod matching N target CIDRs effectively multiplies its available NAT capacity by N.
+  Pods expecting a high number of *concurrent* connections should use a dedicated NATConfig with a
+  larger `portRangeSize` or finer target CIDR splits.
 - **Requires BGP underlay** with pod CIDRs advertised (native routing). Overlay networks are not
   supported. Each node must also run a sidecar BGP daemon (FRR, BIRD, etc.) configured to accept
   the mooring peer as a passive neighbor and redistribute its routes to the DC fabric.
@@ -684,12 +791,12 @@ cleanup via the grace period mechanism.
   `SEC("tcx/ingress")`. Cilium always appends at the tail of the TCX list, so head attachment
   guarantees mooring runs first. `TCX_NEXT` passes non-matching packets to the next program in
   the chain (including Cilium), so coexistence requires no coordination.
-- **Port selection across multiple external IPs**: fill-first — the egress program iterates
-  `snat_config.allocations[0..count-1]`, uses the first entry with a free slot (its `nextPort`
-  counter has not wrapped the range), and spills to the next entry only when the current one is
-  exhausted.
+- **Port selection across multiple external IPs**: `MAX_ENTRY_ATTEMPTS` independent random draws
+  (with replacement) from `nat_config.allocations[]`, not an exhaustive scan — see "Port allocation
+  within a block" above for why an exhaustive fixed-order fallback scan was tried first and rejected
+  (it blew the kernel verifier's instruction budget).
 - **BPF map type for port-range lookup**: `BPF_MAP_TYPE_HASH_OF_MAPS` with per-external-IP
   inner `BPF_MAP_TYPE_ARRAY` maps of 65536 `u32` entries (~256 KB per IP). O(1) lookup by port
   index; outer map is pinned; inner maps are referenced by FD stored in the outer map.
-- **snat_config map key**: compound `{pod-IP, cidr-addr, cidr-prefixlen}` so a pod matching
-  multiple NATConfigs gets independent ext-IP pools and port counters per target CIDR.
+- **nat_config map key**: compound `{pod-IP, cidr-addr, cidr-prefixlen}` so a pod matching
+  multiple NATConfigs gets independent ext-IP pools per target CIDR.

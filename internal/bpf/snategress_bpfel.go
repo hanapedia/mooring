@@ -19,55 +19,41 @@ type SnatEgressLpmKey struct {
 	Addr      uint32
 }
 
-type SnatEgressNatKey struct {
-	_          structs.HostLayout
-	PodIp      uint32
-	ServerIp   uint32
-	NatPort    uint16
-	ServerPort uint16
-}
-
-type SnatEgressNatVal struct {
-	_       structs.HostLayout
-	PodPort uint16
-}
-
-type SnatEgressSessionKey struct {
-	_          structs.HostLayout
-	PodIp      uint32
-	PodPort    uint16
-	_          [2]byte
-	ServerIp   uint32
-	ServerPort uint16
-	Proto      uint8
-	Pad        [3]uint8
-	_          [2]byte
-}
-
-type SnatEgressSessionVal struct {
-	_       structs.HostLayout
-	ExtIp   uint32
-	NatPort uint16
-	_       [2]byte
-}
-
-type SnatEgressSnatConfigKey struct {
+type SnatEgressNatConfigKey struct {
 	_             structs.HostLayout
 	PodIp         uint32
 	CidrAddr      uint32
 	CidrPrefixlen uint32
 }
 
-type SnatEgressSnatConfigVal struct {
-	_           structs.HostLayout
-	Allocations [256]struct {
+type SnatEgressNatConfigVal struct {
+	_               structs.HostLayout
+	PortRangeAllocs [256]struct {
 		_         structs.HostLayout
 		ExtIp     uint32
 		PortStart uint16
 		PortEnd   uint16
-		NextPort  uint32
 	}
 	Count uint32
+}
+
+type SnatEgressNatMapKey struct {
+	_     structs.HostLayout
+	IpA   uint32
+	IpB   uint32
+	PortA uint16
+	PortB uint16
+	Proto uint8
+	Kind  uint8
+	_     [2]byte
+}
+
+type SnatEgressNatMapVal struct {
+	_         structs.HostLayout
+	NatIp     uint32
+	Port      uint16
+	_         [2]byte
+	ClosingNs uint64
 }
 
 type SnatEgressTargetCidrVal struct {
@@ -80,13 +66,10 @@ type SnatEgressTargetCidrVal struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	SnatEgressMapNatTableIcmp     = "nat_table_icmp"
-	SnatEgressMapNatTableTcp      = "nat_table_tcp"
-	SnatEgressMapNatTableUdp      = "nat_table_udp"
-	SnatEgressMapOutboundSessions = "outbound_sessions"
-	SnatEgressMapSnatConfig       = "snat_config"
-	SnatEgressMapTargetCidrs      = "target_cidrs"
-	SnatEgressProgSnatEgress      = "snat_egress"
+	SnatEgressMapNatConfig   = "nat_config"
+	SnatEgressMapNatMap      = "nat_map"
+	SnatEgressMapTargetCidrs = "target_cidrs"
+	SnatEgressProgSnatEgress = "snat_egress"
 )
 
 // LoadSnatEgress returns the embedded CollectionSpec for SnatEgress.
@@ -138,12 +121,9 @@ type SnatEgressProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SnatEgressMapSpecs struct {
-	NatTableIcmp     *ebpf.MapSpec `ebpf:"nat_table_icmp"`
-	NatTableTcp      *ebpf.MapSpec `ebpf:"nat_table_tcp"`
-	NatTableUdp      *ebpf.MapSpec `ebpf:"nat_table_udp"`
-	OutboundSessions *ebpf.MapSpec `ebpf:"outbound_sessions"`
-	SnatConfig       *ebpf.MapSpec `ebpf:"snat_config"`
-	TargetCidrs      *ebpf.MapSpec `ebpf:"target_cidrs"`
+	NatConfig   *ebpf.MapSpec `ebpf:"nat_config"`
+	NatMap      *ebpf.MapSpec `ebpf:"nat_map"`
+	TargetCidrs *ebpf.MapSpec `ebpf:"target_cidrs"`
 }
 
 // SnatEgressVariableSpecs contains global variables before they are loaded into the kernel.
@@ -171,21 +151,15 @@ func (o *SnatEgressObjects) Close() error {
 //
 // It can be passed to LoadSnatEgressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SnatEgressMaps struct {
-	NatTableIcmp     *ebpf.Map `ebpf:"nat_table_icmp"`
-	NatTableTcp      *ebpf.Map `ebpf:"nat_table_tcp"`
-	NatTableUdp      *ebpf.Map `ebpf:"nat_table_udp"`
-	OutboundSessions *ebpf.Map `ebpf:"outbound_sessions"`
-	SnatConfig       *ebpf.Map `ebpf:"snat_config"`
-	TargetCidrs      *ebpf.Map `ebpf:"target_cidrs"`
+	NatConfig   *ebpf.Map `ebpf:"nat_config"`
+	NatMap      *ebpf.Map `ebpf:"nat_map"`
+	TargetCidrs *ebpf.Map `ebpf:"target_cidrs"`
 }
 
 func (m *SnatEgressMaps) Close() error {
 	return _SnatEgressClose(
-		m.NatTableIcmp,
-		m.NatTableTcp,
-		m.NatTableUdp,
-		m.OutboundSessions,
-		m.SnatConfig,
+		m.NatConfig,
+		m.NatMap,
 		m.TargetCidrs,
 	)
 }
