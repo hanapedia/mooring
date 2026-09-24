@@ -100,3 +100,8 @@
 #ifndef ICMP_ECHOREPLY
 #define ICMP_ECHOREPLY 0
 #endif
+
+/* Address families — linux/socket.h (used by bpf_fib_lookup) */
+#ifndef AF_INET
+#define AF_INET 2
+#endif
