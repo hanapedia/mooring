@@ -25,7 +25,7 @@ mooring eliminates this by moving SNAT to the client pod's own node and decoupli
 
 **Outbound (SNAT):** A TC egress BPF program on the node uplink rewrites the source address from `pod-IP:pod-port` to `externalIP:NAT-port` and records the mapping in a per-node NAT table.
 
-**Return path (two-stage revNAT):** Return traffic is distributed across all nodes via BGP ECMP. A TC ingress BPF program on the node uplink handles both stages:
+**Return path (two-stage revNAT):** Return traffic is distributed across all nodes via BGP ECMP. A BPF program on the node uplink handles both stages — TC ingress by default, or optionally XDP (`REVNAT_ATTACH_MODE=xdp`) for lower per-packet overhead:
 
 1. **Stage 1 (IP revNAT):** Uses the `(external IP, NAT port)` pair to look up pod IP from the shared port-range lookup map and rewrites the destination IP.
 2. **Stage 2 (port revNAT):** Looks up the full NAT entry and restores the original pod port.
@@ -137,3 +137,4 @@ spec:
 - **Max concurrent connections**: for a given external IP, the number of concurrent connections a pod can open to the same destination `(IP, port)` is bounded by its assigned port range (`portRangeSize × portRangeCount`). Pods expecting a high number of concurrent connections should request a higher `portRangeCount`.
 - **BGP underlay with native pod routing is required.** Overlay networks are not supported. Other routing methods may be supported in the future.
 - **BPF attachment ordering**: mooring attaches its programs at TCX head on the node uplink, so they run before any tail-attached programs on the same interface. Other CNIs that attach eBPF programs (e.g. Cilium) must support TCX chaining.
+- **XDP mode is opt-in and revNAT-only**: outbound SNAT always attaches via TC (XDP is RX-only). XDP and TCX revNAT are mutually exclusive per node — switching modes requires `moorctl unload` first. The daemon tries native XDP and falls back to generic (SKB-mode) XDP automatically if that fails, which happens routinely on jumbo-MTU veths.
