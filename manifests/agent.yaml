@@ -100,6 +100,8 @@ spec:
           value: "127.0.0.1"
         - name: BGP_LOCAL_ADDR
           value: "127.0.0.2"
+        - name: REVNAT_ATTACH_MODE
+          value: "xdp" # or "tcx"
         securityContext:
           privileged: true
           runAsUser: 0

@@ -43,6 +43,11 @@ func main() {
 		iface = "eth0"
 	}
 
+	attachMode := loader.AttachMode(os.Getenv("REVNAT_ATTACH_MODE"))
+	if attachMode == "" {
+		attachMode = loader.AttachModeTCX
+	}
+
 	bgpCfg, err := bgp.FromEnv()
 	if err != nil {
 		setupLog.Error(err, "invalid BGP configuration")
@@ -50,7 +55,7 @@ func main() {
 	}
 	speaker := bgp.New(bgpCfg)
 
-	if err = loader.EnsureLoaded(iface); err != nil {
+	if err = loader.EnsureLoaded(iface, attachMode); err != nil {
 		setupLog.Error(err, "unable to load BPF programs")
 		os.Exit(1)
 	}
@@ -124,7 +129,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting daemon", "nodeName", nodeName, "iface", iface)
+	setupLog.Info("starting daemon", "nodeName", nodeName, "iface", iface, "revnatAttachMode", attachMode)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)

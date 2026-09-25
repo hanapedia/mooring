@@ -87,6 +87,22 @@ directly through the kernel's FIB + neighbor subsystem, bypassing netfilter enti
 L2 dst MAC is resolved automatically; no iptables rules are installed. mooring's own BPF maps are
 the authoritative connection state.
 
+### XDP mode (optional, selectable)
+
+revNAT (stage 1 + stage 2) can run as an XDP program instead of TCX ingress, selected via
+`REVNAT_ATTACH_MODE=xdp` (daemon) or `moorctl load --mode xdp`. snat_egress always attaches via
+TC egress regardless of mode — XDP is RX-only, so there is no XDP equivalent for the outbound leg.
+
+| Hook | Interface | Direction | Role |
+|---|---|---|---|
+| TCX egress (head) | node uplink | egress | Outbound SNAT |
+| XDP | node uplink | ingress | Combined stage 1 + 2 revNAT |
+
+TCX and XDP revNAT are mutually exclusive on a given node; switching modes requires `moorctl
+unload` first. On attach, the daemon tries native/driver XDP first and falls back to generic
+(SKB-mode) XDP automatically if that fails — this isn't a rare edge case: native XDP on a veth
+whose MTU exceeds one page (common for jumbo-frame BGP underlays) always fails this way.
+
 ### Per-veth attachment (future configuration option)
 
 A future configuration mode will allow attaching the SNAT program to each client pod's
@@ -564,10 +580,12 @@ skipped.
 Runs as a DaemonSet on all nodes. Uses controller-runtime without leader election — every instance
 reconciles independently against its own node's state.
 
-**BPF attachment**: calls `loader.EnsureLoaded(iface)` at startup. If maps and TCX links are
-already pinned from a previous run, the load step is skipped — existing programs continue running
-and in-flight connections are unaffected. In Cilium mode, programs are installed via
-CiliumDatapathPlugin instead of direct TC attachment.
+**BPF attachment**: calls `loader.EnsureLoaded(iface, mode)` at startup, where `mode` (`tcx` or
+`xdp`, from `REVNAT_ATTACH_MODE`) selects how revNAT attaches — see
+[XDP mode](#xdp-mode-optional-selectable). If maps and links are already pinned from a previous
+run, the load step is skipped — existing programs continue running and in-flight connections are
+unaffected. In Cilium mode, programs are installed via CiliumDatapathPlugin instead of direct TC
+attachment.
 
 Four controllers run concurrently:
 

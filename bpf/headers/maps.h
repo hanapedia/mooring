@@ -1,5 +1,12 @@
+#pragma once
+
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
+
+struct lpm_key {
+  __u32 prefixlen;
+  __be32 addr;
+};
 
 // nat_map holds both the forward (snat) and reverse (revnat) direction of
 // every tracked connection, in a single map, disambiguated by `kind`. Each
@@ -61,11 +68,6 @@ struct {
   __type(key, struct nat_map_key);
   __type(value, struct nat_map_val);
 } nat_map SEC(".maps");
-
-struct lpm_key {
-  __u32 prefixlen;
-  __be32 addr;
-};
 
 // Value stored in target_cidrs: the canonical network address and prefix length
 // of the matched CIDR. Stored redundantly so the egress program can retrieve
