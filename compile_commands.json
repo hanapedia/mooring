@@ -3,11 +3,15 @@
     "directory": "/workspace",
     "arguments": [
       "clang",
-      "--target=bpf",
+      "-target",
+      "bpfel",
       "-O2",
       "-g",
       "-Wall",
-      "-I/workspace/bpf/headers",
+      "-Werror",
+      "-Wno-missing-declarations",
+      "-mcpu=v3",
+      "-Ibpf/headers",
       "-I/usr/local/include",
       "-c",
       "bpf/snat_egress.c"
@@ -18,30 +22,38 @@
     "directory": "/workspace",
     "arguments": [
       "clang",
-      "--target=bpf",
+      "-target",
+      "bpfel",
       "-O2",
       "-g",
       "-Wall",
-      "-I/workspace/bpf/headers",
+      "-Werror",
+      "-Wno-missing-declarations",
+      "-mcpu=v3",
+      "-Ibpf/headers",
       "-I/usr/local/include",
       "-c",
-      "bpf/revnat_ip.c"
+      "bpf/revnat_ingress.c"
     ],
-    "file": "bpf/revnat_ip.c"
+    "file": "bpf/revnat_ingress.c"
   },
   {
     "directory": "/workspace",
     "arguments": [
       "clang",
-      "--target=bpf",
+      "-target",
+      "bpfel",
       "-O2",
       "-g",
       "-Wall",
-      "-I/workspace/bpf/headers",
+      "-Werror",
+      "-Wno-missing-declarations",
+      "-mcpu=v3",
+      "-Ibpf/headers",
       "-I/usr/local/include",
       "-c",
-      "bpf/revnat_port.c"
+      "bpf/revnat_xdp.c"
     ],
-    "file": "bpf/revnat_port.c"
+    "file": "bpf/revnat_xdp.c"
   }
 ]

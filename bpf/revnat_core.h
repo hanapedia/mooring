@@ -50,9 +50,9 @@ static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 nat_port,
   };
   struct nat_map_val *nv = bpf_map_lookup_elem(&nat_map, &revnat_key);
   if (!nv) {
-    bpf_printk("revnat: stage2 not-local src=%x dst=%x port=%u\n",
-               bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
-               bpf_ntohs(nat_port));
+    // bpf_printk("revnat: stage2 not-local src=%x dst=%x port=%u\n",
+    //            bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+    //            bpf_ntohs(nat_port));
     return ctx_redirect_transit(ctx);
   }
 
@@ -108,9 +108,9 @@ static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 nat_port,
     icmph->un.echo.id = pod_port;
   }
 
-  bpf_printk("revnat: stage2 local src=%x dst=%x port=%u\n",
-             bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
-             bpf_ntohs(nat_port));
+  // bpf_printk("revnat: stage2 local src=%x dst=%x port=%u\n",
+  //            bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+  //            bpf_ntohs(nat_port));
 
   ctx_l4_csum_replace_port(ctx, csum_off, nat_port, pod_port);
 
@@ -200,14 +200,14 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
   // dst is not an external IP — stage 1 already ran on another node and dst
   // is now pod_ip. attempt stage 2 directly.
   if (!bpf_map_lookup_elem(&ext_ip_pool, &dlpm)) {
-    bpf_printk("revnat: stage2 path src=%x dst=%x\n", bpf_ntohl(iph->saddr),
-               bpf_ntohl(iph->daddr));
+    // bpf_printk("revnat: stage2 path src=%x dst=%x\n", bpf_ntohl(iph->saddr),
+    //            bpf_ntohl(iph->daddr));
     return do_port_revnat(ctx, nat_port, server_port, csum_off);
   }
 
-  bpf_printk("revnat: stage1 path src=%x dst=%x port=%u\n",
-             bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
-             bpf_ntohs(nat_port));
+  // bpf_printk("revnat: stage1 path src=%x dst=%x port=%u\n",
+  //            bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+  //            bpf_ntohs(nat_port));
 
   // lookup per-protocol port range to find pod ip
   __be32 ext_ip = iph->daddr;
@@ -220,8 +220,8 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
     inner = bpf_map_lookup_elem(&port_range_lookup_icmp, &ext_ip);
   }
   if (!inner) {
-    bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
-               bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
+    // bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
+    //            bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
     return CTX_PASS;
   }
   __u32 port_idx = bpf_ntohs(nat_port);

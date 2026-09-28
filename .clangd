@@ -1,0 +1,17 @@
+CompileFlags:
+  CompilationDatabase: .
+---
+# revnat_core.h is intentionally not self-contained: it's written purely in
+# terms of __ctx_buff/CTX_*/ctx_* macros that ctx/skb.h or ctx/xdp.h define
+# before revnat_ingress.c or revnat_xdp.c #include it. Opened on its own,
+# clangd compiles it as its own translation unit with none of those macros
+# defined. Force one context (TC/skb) in just for editor diagnostics/
+# completion -- this has no effect on the real bpf2go build.
+If:
+  PathMatch: bpf/revnat_core\.h
+CompileFlags:
+  # -Wno-unused-function: revnat_core/do_port_revnat are static and only
+  # ever called from revnat_ingress.c/revnat_xdp.c, not from within this
+  # header -- a real diagnostic there, but a false positive when clangd
+  # treats this header as its own standalone translation unit.
+  Add: [-include, bpf/headers/ctx/skb.h, -Wno-unused-function]
