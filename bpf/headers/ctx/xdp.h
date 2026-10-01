@@ -141,8 +141,8 @@ static __always_inline int ctx_redirect_transit(__ctx_buff *ctx) {
   // bpf_redirect_neigh would do -- not a locally-originated-packet lookup.
   int rc = bpf_fib_lookup(ctx, &fib_params, sizeof(fib_params), 0);
   if (rc != BPF_FIB_LKUP_RET_SUCCESS) {
-    bpf_printk("revnat: xdp transit fib_lookup miss rc=%d ifindex=%u\n", rc,
-               ctx->ingress_ifindex);
+    // bpf_printk("revnat: xdp transit fib_lookup miss rc=%d ifindex=%u\n", rc,
+    //            ctx->ingress_ifindex);
     // TODO(observability): this printk is a placeholder. Add a real
     // counter/metric for this drop path once datapath observability
     // (counters exported via moorctl/metrics) lands.
