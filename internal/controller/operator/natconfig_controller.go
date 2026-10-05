@@ -3,9 +3,12 @@ package operator
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/allocator"
+	"github.com/hanapedia/mooring/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,10 +35,16 @@ func (r *NATConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			// NATPortRangeRequests; GC cascades to NATPortRanges; the NPR controller
 			// finalizer reclaims block indices.
 			r.Registry.Remove(req.Name)
+			metrics.NATConfigPortsFree.DeletePartialMatch(prometheus.Labels{"natconfig": req.Name})
+			metrics.NATConfigPortsTotal.DeletePartialMatch(prometheus.Labels{"natconfig": req.Name})
+			metrics.NATConfigPortAllocationFailuresTotal.DeleteLabelValues(req.Name)
+			metrics.NATConfigInfo.DeletePartialMatch(prometheus.Labels{"natconfig": req.Name})
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+
+	metrics.NATConfigInfo.WithLabelValues(nc.Name, strconv.Itoa(int(nc.Spec.PortRangeSize))).Set(1)
 
 	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize))
 	if err != nil {
@@ -83,7 +92,11 @@ func (r *NATConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// RemoveIP discards all tracked blocks for the IP; no explicit Free needed.
 	for _, ip := range removedIPs {
 		alloc.RemoveIP(ip)
+		metrics.NATConfigPortsFree.DeleteLabelValues(nc.Name, ip)
+		metrics.NATConfigPortsTotal.DeleteLabelValues(nc.Name, ip)
 	}
+
+	r.Registry.RecordAvailability(nc.Name)
 
 	return ctrl.Result{}, nil
 }

@@ -8,6 +8,8 @@ import (
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/allocator"
+	"github.com/hanapedia/mooring/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,11 +32,17 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 	var nprr v1alpha1.NATPortRangeRequest
 	if err := r.Get(ctx, req.NamespacedName, &nprr); err != nil {
 		if apierrors.IsNotFound(err) {
+			// NPRR has no finalizer, so by the time we observe its deletion its
+			// Spec is already gone — "name" is the only label left to delete by.
+			metrics.NATPortRangeRequestInfo.DeletePartialMatch(prometheus.Labels{"name": req.Name})
 			// NPRR is gone — mark the paired NPR stale so all daemons clean up BPF maps.
 			return r.markNPRStale(ctx, req.Name)
 		}
 		return ctrl.Result{}, err
 	}
+
+	metrics.NATPortRangeRequestInfo.WithLabelValues(
+		nprr.Name, nprr.Spec.PodName, nprr.Spec.PodNamespace, nprr.Spec.NodeName, nprr.Spec.NATConfig).Set(1)
 
 	var nc v1alpha1.NATConfig
 	if err := r.Get(ctx, types.NamespacedName{Name: nprr.Spec.NATConfig}, &nc); err != nil {
@@ -119,6 +127,7 @@ func (r *NATPortRangeRequestReconciler) createNPR(
 		_ = alloc.Free(allocations)
 		return ctrl.Result{}, err
 	}
+	r.Registry.RecordAvailability(nc.Name)
 	return ctrl.Result{}, nil
 }
 
@@ -156,6 +165,7 @@ func (r *NATPortRangeRequestReconciler) increaseCount(
 		_ = alloc.Free(rollback)
 		return ctrl.Result{}, err
 	}
+	r.Registry.RecordAvailability(npr.Spec.NATConfig)
 	return ctrl.Result{}, nil
 }
 
@@ -198,6 +208,7 @@ func (r *NATPortRangeRequestReconciler) decreaseCount(
 		return ctrl.Result{}, err
 	}
 	_ = alloc.Free(toFree)
+	r.Registry.RecordAvailability(npr.Spec.NATConfig)
 	return ctrl.Result{}, nil
 }
 
