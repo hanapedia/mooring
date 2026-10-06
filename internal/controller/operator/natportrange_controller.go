@@ -6,11 +6,23 @@ import (
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/allocator"
+	"github.com/hanapedia/mooring/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// sumAllocatedPorts returns the total number of ports across all of an
+// NATPortRange's PortAllocations.
+func sumAllocatedPorts(allocs []v1alpha1.PortAllocation) int32 {
+	var total int32
+	for _, a := range allocs {
+		total += a.PortEnd - a.PortStart + 1
+	}
+	return total
+}
 
 const (
 	// DefaultBPFCleanupWindow is the window given to all daemon instances to
@@ -45,6 +57,23 @@ func (r *NATPortRangeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.Get(ctx, req.NamespacedName, &npr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	metrics.NATPortRangePortsAllocated.
+		WithLabelValues(npr.Spec.PodName, npr.Spec.PodNamespace, npr.Spec.NodeName, npr.Spec.NATConfig).
+		Set(float64(sumAllocatedPorts(npr.Spec.Allocations)))
+
+	// Info row: exactly one of the two state values is set at a time. The
+	// other is explicitly deleted on every reconcile so a state transition
+	// (active -> stale_pending_cleanup) doesn't leave the old row lingering.
+	state, otherState := "active", "stale_pending_cleanup"
+	if npr.Spec.StaleSince != nil {
+		state, otherState = otherState, state
+	}
+	metrics.NATPortRangeInfo.
+		WithLabelValues(npr.Spec.PodName, npr.Spec.PodNamespace, npr.Spec.NodeName, npr.Spec.NATConfig, state).
+		Set(1)
+	metrics.NATPortRangeInfo.DeleteLabelValues(
+		npr.Spec.PodName, npr.Spec.PodNamespace, npr.Spec.NodeName, npr.Spec.NATConfig, otherState)
 
 	// NPR is terminating (DeletionTimestamp set by GC cascade or by us below).
 	// Ensure StaleSince is stamped so daemons can clean up BPF maps, then
@@ -95,7 +124,24 @@ func (r *NATPortRangeReconciler) releaseAndFinalize(ctx context.Context, npr *v1
 		}
 	}
 	controllerutil.RemoveFinalizer(npr, finalizerName)
-	return ctrl.Result{}, r.Update(ctx, npr)
+	if err := r.Update(ctx, npr); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Delete the ports-allocated series now, while npr.Spec is still populated:
+	// once the finalizer is gone the object disappears and this label set can
+	// never be reconstructed. The apierrors.IsNotFound branch of Reconcile (hit
+	// on a later reconcile after the object is fully gone) relies on this
+	// having already run — do not reorder finalizer removal ahead of this.
+	metrics.NATPortRangePortsAllocated.DeleteLabelValues(
+		npr.Spec.PodName, npr.Spec.PodNamespace, npr.Spec.NodeName, npr.Spec.NATConfig)
+	// DeletePartialMatch on everything but "state" removes whichever of the
+	// two state rows is currently live, without needing to know which.
+	metrics.NATPortRangeInfo.DeletePartialMatch(prometheus.Labels{
+		"pod": npr.Spec.PodName, "namespace": npr.Spec.PodNamespace,
+		"node": npr.Spec.NodeName, "natconfig": npr.Spec.NATConfig,
+	})
+	r.Registry.RecordAvailability(npr.Spec.NATConfig)
+	return ctrl.Result{}, nil
 }
 
 func (r *NATPortRangeReconciler) SetupWithManager(mgr ctrl.Manager) error {

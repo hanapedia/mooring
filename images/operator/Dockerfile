@@ -9,6 +9,7 @@ COPY api/ api/
 COPY cmd/operator/ cmd/operator/
 COPY internal/allocator/ internal/allocator/
 COPY internal/controller/operator/ internal/controller/operator/
+COPY internal/metrics/ internal/metrics/
 
 RUN CGO_ENABLED=0 go build \
       -ldflags="-s -w" \

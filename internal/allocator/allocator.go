@@ -33,16 +33,23 @@ type Allocation struct {
 //
 // All methods are safe for concurrent use.
 type BlockAllocator struct {
-	mu          sync.Mutex
-	blockSize   uint16
-	minPort     uint16
-	totalBlocks uint16
+	mu            sync.Mutex
+	blockSize     uint16
+	minPort       uint16
+	totalBlocks   uint16
+	natConfigName string
+	// onExhausted, if non-nil, is called every time a pickFromSet call fails
+	// due to pool exhaustion (used to drive the port-allocation-failure metric).
+	onExhausted func()
 	ips         map[string]map[uint16]struct{} // extIP → free block index set
 }
 
-// New creates a BlockAllocator with the given fixed block size and port bounds.
+// New creates a BlockAllocator with the given fixed block size and port bounds,
+// for the NATConfig named natConfigName. onExhausted, if non-nil, is invoked on
+// every allocation failure caused by pool exhaustion; it is called with the
+// allocator's internal mutex held, so it must not call back into the allocator.
 // External IPs must be registered with EnsureIP before any allocation.
-func New(blockSize, minPort, maxPort uint16) (*BlockAllocator, error) {
+func New(blockSize, minPort, maxPort uint16, natConfigName string, onExhausted func()) (*BlockAllocator, error) {
 	if blockSize == 0 {
 		return nil, fmt.Errorf("blockSize must be > 0")
 	}
@@ -58,10 +65,12 @@ func New(blockSize, minPort, maxPort uint16) (*BlockAllocator, error) {
 		return nil, fmt.Errorf("port space [%d, %d] too small for blockSize %d", minPort, maxPort, blockSize)
 	}
 	return &BlockAllocator{
-		blockSize:   blockSize,
-		minPort:     minPort,
-		totalBlocks: totalBlocks,
-		ips:         make(map[string]map[uint16]struct{}),
+		blockSize:     blockSize,
+		minPort:       minPort,
+		totalBlocks:   totalBlocks,
+		natConfigName: natConfigName,
+		onExhausted:   onExhausted,
+		ips:           make(map[string]map[uint16]struct{}),
 	}, nil
 }
 
@@ -136,7 +145,10 @@ func (a *BlockAllocator) AllocateForPod(extIPs []string, portRangeCount uint16) 
 		chosen, err := pickFromSet(free, portRangeCount, podUsed)
 		if err != nil {
 			a.rollback(rolledBack)
-			return nil, fmt.Errorf("IP %s: %w", ip, err)
+			if a.onExhausted != nil {
+				a.onExhausted()
+			}
+			return nil, fmt.Errorf("NATConfig %s: IP %s: %w", a.natConfigName, ip, err)
 		}
 
 		rolledBack[ip] = chosen
@@ -214,7 +226,10 @@ func (a *BlockAllocator) AllocateForIP(extIP string, portRangeCount uint16, exis
 
 	chosen, err := pickFromSet(free, portRangeCount, exclude)
 	if err != nil {
-		return nil, fmt.Errorf("IP %s: %w", extIP, err)
+		if a.onExhausted != nil {
+			a.onExhausted()
+		}
+		return nil, fmt.Errorf("NATConfig %s: IP %s: %w", a.natConfigName, extIP, err)
 	}
 
 	allocs := make([]Allocation, len(chosen))
@@ -245,6 +260,20 @@ func (a *BlockAllocator) FreeCount(extIP string) (uint16, bool) {
 	defer a.mu.Unlock()
 	free, ok := a.ips[extIP]
 	return uint16(len(free)), ok
+}
+
+// TotalBlocks returns the total number of blocks per external IP (free + in-use).
+func (a *BlockAllocator) TotalBlocks() uint16 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.totalBlocks
+}
+
+// BlockSize returns the fixed number of ports per block.
+func (a *BlockAllocator) BlockSize() uint16 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.blockSize
 }
 
 // blockIndexOf computes the block index for portStart. Caller must hold mu.

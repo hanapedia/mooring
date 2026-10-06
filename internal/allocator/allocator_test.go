@@ -14,7 +14,7 @@ const (
 
 func newTestAllocator(t *testing.T, ips ...string) *allocator.BlockAllocator {
 	t.Helper()
-	a, err := allocator.New(blockSize, minPort, maxPort)
+	a, err := allocator.New(blockSize, minPort, maxPort, "test", nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -103,10 +103,12 @@ func TestSameBlockReusableAcrossPods(t *testing.T) {
 	// allocator unnecessarily blocked reuse.
 }
 
-// TestExhaustion confirms an informative error when a per-IP pool is full.
+// TestExhaustion confirms an informative error when a per-IP pool is full,
+// and that onExhausted fires exactly once per failed allocation call.
 func TestExhaustion(t *testing.T) {
 	// Small port space: 3 blocks only.
-	a, err := allocator.New(100, 1024, 1323)
+	exhaustedCount := 0
+	a, err := allocator.New(100, 1024, 1323, "test", func() { exhaustedCount++ })
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -118,8 +120,20 @@ func TestExhaustion(t *testing.T) {
 			t.Fatalf("allocation %d failed: %v", i, err)
 		}
 	}
+	if exhaustedCount != 0 {
+		t.Errorf("onExhausted called %d times before exhaustion, want 0", exhaustedCount)
+	}
 	if _, err := a.AllocateForPod([]string{ip}, 1); err == nil {
 		t.Error("expected error on exhausted pool, got nil")
+	}
+	if exhaustedCount != 1 {
+		t.Errorf("onExhausted called %d times after one failed allocation, want 1", exhaustedCount)
+	}
+	if _, err := a.AllocateForPod([]string{ip}, 1); err == nil {
+		t.Error("expected error on exhausted pool, got nil")
+	}
+	if exhaustedCount != 2 {
+		t.Errorf("onExhausted called %d times after two failed allocations, want 2", exhaustedCount)
 	}
 }
 
@@ -130,7 +144,7 @@ func TestRollbackOnFailure(t *testing.T) {
 	// Requesting portRangeCount=2 across both IPs requires 2 unique blocks per IP.
 	// ip2 only has 1 free block → allocation should fail.
 	// ip1's blocks should be returned so its FreeCount goes back to 2.
-	a, err := allocator.New(100, 1024, 1323) // 3 blocks total
+	a, err := allocator.New(100, 1024, 1323, "test", nil) // 3 blocks total
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

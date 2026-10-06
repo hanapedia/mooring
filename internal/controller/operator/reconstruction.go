@@ -81,6 +81,10 @@ func (r *ReconstructionRunnable) Start(ctx context.Context) error {
 		}
 	}
 
+	for _, nc := range configs.Items {
+		r.Registry.RecordAvailability(nc.Name)
+	}
+
 	log.Info("reconstruction complete",
 		"natConfigs", len(configs.Items), "natPortRanges", len(ranges.Items))
 	r.Registry.MarkReconstructed()
