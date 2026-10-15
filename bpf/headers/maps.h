@@ -69,6 +69,44 @@ struct {
   __type(value, struct nat_map_val);
 } nat_map SEC(".maps");
 
+// Shared TCP close state machine for nat_map, used by both snat_egress.c
+// (pod->server direction) and revnat_core.h (server->pod direction). own_key
+// is the entry the caller already has in hand (the snat entry on egress, the
+// revnat entry on ingress) and own its value; peer_key is the OTHER half of
+// the same connection (the revnat entry on egress, the snat entry on
+// ingress) -- each side already knows how to build both keys for its own
+// direction, so this takes them as plain key/value arguments rather than
+// deriving anything from a packet itself (no ctx access here, no
+// pointer-staleness concerns, no re-derivation needed).
+//
+// The first FIN or RST (either direction) stamps closing_ns on both
+// entries. A second FIN or RST, combined with ACK, confirms the close and
+// deletes both -- requiring a second terminating segment (not just any
+// ACK) specifically avoids tearing down a half-closed connection (one side
+// FIN'd, the other still sending data) onto a fresh port mid-flow. If the
+// close is never confirmed (crash, dropped FIN/RST), the entries are left
+// in place but become eligible for reclamation -- see snat_egress.c's
+// try_alloc_port for that stale-entry path.
+static __always_inline void track_tcp_close(struct nat_map_key *own_key,
+                                            struct nat_map_val *own,
+                                            struct nat_map_key *peer_key,
+                                            __u8 fin, __u8 rst, __u8 ack) {
+  if (own->closing_ns) {
+    if ((fin || rst) && ack) {
+      bpf_map_delete_elem(&nat_map, own_key);
+      bpf_map_delete_elem(&nat_map, peer_key);
+    }
+    return;
+  }
+  if (!fin && !rst)
+    return;
+  __u64 now = bpf_ktime_get_ns();
+  own->closing_ns = now;
+  struct nat_map_val *peer = bpf_map_lookup_elem(&nat_map, peer_key);
+  if (peer)
+    peer->closing_ns = now;
+}
+
 // Value stored in target_cidrs: the canonical network address and prefix length
 // of the matched CIDR. Stored redundantly so the egress program can retrieve
 // the matching CIDR identity from the value (BPF LPM lookup returns the value

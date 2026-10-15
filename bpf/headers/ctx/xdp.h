@@ -116,7 +116,23 @@ static __always_inline void ctx_l4_csum_replace_port(__ctx_buff *ctx,
 // the uplink's BGP next hop, which stays warm as a side effect of the BGP
 // session itself being up, not something revnat traffic depends on freshly
 // resolving.
-static __always_inline int ctx_redirect_transit(__ctx_buff *ctx) {
+//
+// __noinline, not __always_inline: this is called from a point in
+// revnat_core.h reached by several predecessor edges inside the already-
+// inlined do_port_revnat (its various early-return paths). ctx_data()/
+// ctx_data_end() read xdp_md's fields through a CO-RE relocation that,
+// absent a real function-call boundary here, LLVM's redundancy elimination
+// treats as shareable: it threads the already-computed field-offset values
+// in from those predecessors via a phi instead of recomputing them locally.
+// A ctx-pointer offset arriving via a phi, rather than as a literal
+// immediate on the load instruction, is a shape the XDP verifier's
+// ctx-dereference special-casing doesn't recognize as safe, even though the
+// value is always correct ("permission denied: dereference of modified ctx
+// ptr ... disallowed", confirmed by inspecting the generated IR). Keeping
+// this a real, separately-verified subroutine call means its ctx_data/
+// ctx_data_end computation can never be merged with a caller's in the first
+// place -- not a workaround bolted onto the symptom.
+static __noinline int ctx_redirect_transit(__ctx_buff *ctx) {
   void *data = ctx_data(ctx);
   void *data_end = ctx_data_end(ctx);
 

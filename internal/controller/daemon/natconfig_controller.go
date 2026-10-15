@@ -24,7 +24,7 @@ type NATConfigReconciler struct {
 	client.Client
 	NodeName        string
 	TargetCIDRs     TargetCIDRMap
-	ExtIPPool       ExtIPPoolMap
+	ExtIPKind       ExtIPKindMap
 	RouteAdvertiser routing.RouteAdvertiser
 
 	mu                sync.Mutex
@@ -33,12 +33,12 @@ type NATConfigReconciler struct {
 	ncAdvertisedCIDRs map[string][]string // ncName → CIDRs currently advertised by this node
 }
 
-func NewNATConfigReconciler(c client.Client, nodeName string, targetCIDRs TargetCIDRMap, extIPPool ExtIPPoolMap, advertiser routing.RouteAdvertiser) *NATConfigReconciler {
+func NewNATConfigReconciler(c client.Client, nodeName string, targetCIDRs TargetCIDRMap, extIPKind ExtIPKindMap, advertiser routing.RouteAdvertiser) *NATConfigReconciler {
 	return &NATConfigReconciler{
 		Client:            c,
 		NodeName:          nodeName,
 		TargetCIDRs:       targetCIDRs,
-		ExtIPPool:         extIPPool,
+		ExtIPKind:         extIPKind,
 		RouteAdvertiser:   advertiser,
 		ncTargetCIDRs:     make(map[string][]string),
 		ncExtIPCIDRs:      make(map[string][]string),
@@ -80,11 +80,11 @@ func (r *NATConfigReconciler) syncBPFMaps(ctx context.Context, ncName string, de
 	oldExtIP := r.ncExtIPCIDRs[ncName]
 	r.mu.Unlock()
 
-	if err := r.applyLPMDiff(ncName, oldTarget, desiredTargetCIDRs, r.ncTargetCIDRs, r.TargetCIDRs.Add, r.TargetCIDRs.Remove); err != nil {
+	if err := r.applyCIDRDiff(ncName, oldTarget, desiredTargetCIDRs, r.ncTargetCIDRs, r.TargetCIDRs.Add, r.TargetCIDRs.Remove); err != nil {
 		return fmt.Errorf("target_cidrs: %w", err)
 	}
-	if err := r.applyLPMDiff(ncName, oldExtIP, desiredExtIPCIDRs, r.ncExtIPCIDRs, r.ExtIPPool.Add, r.ExtIPPool.Remove); err != nil {
-		return fmt.Errorf("ext_ip_pool: %w", err)
+	if err := r.applyCIDRDiff(ncName, oldExtIP, desiredExtIPCIDRs, r.ncExtIPCIDRs, r.ExtIPKind.Add, r.ExtIPKind.Remove); err != nil {
+		return fmt.Errorf("dst_kind (ext ip): %w", err)
 	}
 	if err := r.syncRoutes(ctx, ncName, desiredRouteCIDRs); err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -117,7 +117,7 @@ func (r *NATConfigReconciler) syncRoutes(ctx context.Context, ncName string, new
 		}
 	}
 
-	// Update tracking before the withdrawal check mirrors applyLPMDiff so
+	// Update tracking before the withdrawal check mirrors applyCIDRDiff so
 	// cidrUsedByOther sees the correct final state.
 	r.mu.Lock()
 	r.ncAdvertisedCIDRs[ncName] = newCIDRs
@@ -141,9 +141,12 @@ func (r *NATConfigReconciler) syncRoutes(ctx context.Context, ncName string, new
 	return nil
 }
 
-// applyLPMDiff adds newly desired CIDRs, updates the in-memory tracking, then
+// applyCIDRDiff adds newly desired CIDRs, updates the in-memory tracking, then
 // removes dropped CIDRs that are no longer referenced by any NATConfig.
-func (r *NATConfigReconciler) applyLPMDiff(
+// add/remove are backed by target_cidrs (an LPM trie) or dst_kind's ext-IP
+// side (a plain hash) depending on the caller -- this function doesn't care
+// which, it only diffs CIDR strings.
+func (r *NATConfigReconciler) applyCIDRDiff(
 	ncName string,
 	oldCIDRs, newCIDRs []string,
 	tracking map[string][]string,

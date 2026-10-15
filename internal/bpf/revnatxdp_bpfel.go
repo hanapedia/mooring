@@ -48,7 +48,7 @@ type RevnatXdpTargetCidrVal struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	RevnatXdpMapExtIpPool           = "ext_ip_pool"
+	RevnatXdpMapDstKind             = "dst_kind"
 	RevnatXdpMapNatMap              = "nat_map"
 	RevnatXdpMapPortRangeInner      = "port_range_inner"
 	RevnatXdpMapPortRangeLookupIcmp = "port_range_lookup_icmp"
@@ -107,7 +107,7 @@ type RevnatXdpProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type RevnatXdpMapSpecs struct {
-	ExtIpPool           *ebpf.MapSpec `ebpf:"ext_ip_pool"`
+	DstKind             *ebpf.MapSpec `ebpf:"dst_kind"`
 	NatMap              *ebpf.MapSpec `ebpf:"nat_map"`
 	PortRangeInner      *ebpf.MapSpec `ebpf:"port_range_inner"`
 	PortRangeLookupIcmp *ebpf.MapSpec `ebpf:"port_range_lookup_icmp"`
@@ -141,7 +141,7 @@ func (o *RevnatXdpObjects) Close() error {
 //
 // It can be passed to LoadRevnatXdpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type RevnatXdpMaps struct {
-	ExtIpPool           *ebpf.Map `ebpf:"ext_ip_pool"`
+	DstKind             *ebpf.Map `ebpf:"dst_kind"`
 	NatMap              *ebpf.Map `ebpf:"nat_map"`
 	PortRangeInner      *ebpf.Map `ebpf:"port_range_inner"`
 	PortRangeLookupIcmp *ebpf.Map `ebpf:"port_range_lookup_icmp"`
@@ -152,7 +152,7 @@ type RevnatXdpMaps struct {
 
 func (m *RevnatXdpMaps) Close() error {
 	return _RevnatXdpClose(
-		m.ExtIpPool,
+		m.DstKind,
 		m.NatMap,
 		m.PortRangeInner,
 		m.PortRangeLookupIcmp,

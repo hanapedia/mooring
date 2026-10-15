@@ -41,9 +41,10 @@ var (
 	cancel              context.CancelFunc
 	counter             atomic.Int64
 	mockTargetCIDR      *recordingTargetCIDRMap
-	mockExtIPPool       *recordingExtIPPoolMap
+	mockExtIPKind       *recordingExtIPKindMap
 	mockPortRangeLookup *recordingPortRangeLookupMap
 	mockNatConfig       *recordingNatConfigMap
+	mockPodIPKind       *recordingPodIPKindMap
 	mockRouteAdvertiser *recordingRouteAdvertiser
 )
 
@@ -80,9 +81,10 @@ var _ = BeforeSuite(func() {
 	})).To(Succeed())
 
 	mockTargetCIDR = &recordingTargetCIDRMap{}
-	mockExtIPPool = &recordingExtIPPoolMap{}
+	mockExtIPKind = &recordingExtIPKindMap{}
 	mockPortRangeLookup = &recordingPortRangeLookupMap{}
 	mockNatConfig = &recordingNatConfigMap{}
+	mockPodIPKind = &recordingPodIPKindMap{}
 	mockRouteAdvertiser = &recordingRouteAdvertiser{}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -116,9 +118,9 @@ var _ = BeforeSuite(func() {
 		NodeName: testNodeName,
 	}).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), testNodeName, mockTargetCIDR, mockExtIPPool, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), testNodeName, mockTargetCIDR, mockExtIPKind, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockNatConfig).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockNatConfig, mockPodIPKind).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()
@@ -223,36 +225,68 @@ func (m *recordingTargetCIDRMap) hasRemoved(cidr string) bool {
 	return slices.Contains(m.removed, cidr)
 }
 
-type recordingExtIPPoolMap struct {
+type recordingExtIPKindMap struct {
 	mu      sync.Mutex
 	added   []string
 	removed []string
 }
 
-func (m *recordingExtIPPoolMap) Add(cidr *net.IPNet) error {
+func (m *recordingExtIPKindMap) Add(cidr *net.IPNet) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.added = append(m.added, cidr.String())
 	return nil
 }
 
-func (m *recordingExtIPPoolMap) Remove(cidr *net.IPNet) error {
+func (m *recordingExtIPKindMap) Remove(cidr *net.IPNet) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.removed = append(m.removed, cidr.String())
 	return nil
 }
 
-func (m *recordingExtIPPoolMap) hasAdded(cidr string) bool {
+func (m *recordingExtIPKindMap) hasAdded(cidr string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Contains(m.added, cidr)
 }
 
-func (m *recordingExtIPPoolMap) hasRemoved(cidr string) bool {
+func (m *recordingExtIPKindMap) hasRemoved(cidr string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Contains(m.removed, cidr)
+}
+
+type recordingPodIPKindMap struct {
+	mu      sync.Mutex
+	added   []string
+	removed []string
+}
+
+func (m *recordingPodIPKindMap) Add(podIP net.IP) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.added = append(m.added, podIP.String())
+	return nil
+}
+
+func (m *recordingPodIPKindMap) Remove(podIP net.IP) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removed = append(m.removed, podIP.String())
+	return nil
+}
+
+func (m *recordingPodIPKindMap) hasAdded(podIP string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Contains(m.added, podIP)
+}
+
+func (m *recordingPodIPKindMap) hasRemoved(podIP string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Contains(m.removed, podIP)
 }
 
 type portRangeCall struct {

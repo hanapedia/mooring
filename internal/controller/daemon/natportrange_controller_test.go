@@ -143,6 +143,51 @@ var _ = Describe("NATPortRange sync controller", func() {
 		})
 	})
 
+	Describe("dst_kind pod-IP side", func() {
+		It("adds the pod IP for a local-node NPR", func() {
+			extIP := "203.0.115.30"
+			podIP := "10.244.4.40"
+			npr := makeNPR(uniqueName("npr"), testNodeName, podIP, extIP, 2000, 2099)
+			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
+
+			eventually(func() bool { return mockPodIPKind.hasAdded(podIP) })
+		})
+
+		It("does not add the pod IP for a remote-node NPR", func() {
+			extIP := "203.0.115.31"
+			podIP := "10.244.4.41"
+			npr := makeNPR(uniqueName("npr"), "other-node", podIP, extIP, 2100, 2199)
+			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
+
+			eventually(func() bool {
+				return mockPortRangeLookup.hasAdded(extIP, podIP, 2100, 2199, 6)
+			})
+			consistently(func() bool { return !mockPodIPKind.hasAdded(podIP) })
+		})
+
+		It("removes the pod IP once the last local NPR for it goes stale", func() {
+			podIP := "10.244.4.42"
+			nprA := makeNPR(uniqueName("npr"), testNodeName, podIP, "203.0.115.32", 2200, 2299)
+			nprB := makeNPR(uniqueName("npr"), testNodeName, podIP, "203.0.115.33", 2300, 2399)
+			Expect(k8sClient.Create(ctx, nprA)).To(Succeed())
+			Expect(k8sClient.Create(ctx, nprB)).To(Succeed())
+
+			eventually(func() bool { return mockPodIPKind.hasAdded(podIP) })
+
+			// Mark the first NPR stale; the pod IP is still referenced by nprB,
+			// so it must not be removed yet.
+			markStale(nprA.Name)
+			eventually(func() bool {
+				return mockPortRangeLookup.hasRemoved("203.0.115.32", podIP, 2200, 2299, 6)
+			})
+			consistently(func() bool { return !mockPodIPKind.hasRemoved(podIP) })
+
+			// Now mark the second (last) NPR for this pod stale too.
+			markStale(nprB.Name)
+			eventually(func() bool { return mockPodIPKind.hasRemoved(podIP) })
+		})
+	})
+
 	Describe("minimal diff on allocation change", func() {
 		It("removes old allocation and adds new one when allocations are updated", func() {
 			oldExtIP := "203.0.115.6"

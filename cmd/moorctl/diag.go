@@ -30,10 +30,10 @@ var diagCmd = &cobra.Command{
 var diagStage1Cmd = &cobra.Command{
 	Use:   "stage1",
 	Short: "Check revNAT stage-1 map conditions for a given packet header",
-	Long: `Simulates the three revnat_ingress stage-1 BPF lookups from userspace:
+	Long: `Simulates the revnat_ingress stage-1 BPF lookups from userspace:
   1. Is src-ip in target_cidrs?
-  2. Is dst-ip in ext_ip_pool?
-  3. Is (dst-ip, dst-port) in port_range_lookup?
+  2. What kind is dst-ip in dst_kind (EXT_IP, POD_IP, or miss -- not mooring)?
+  3. If EXT_IP: is (dst-ip, dst-port) in port_range_lookup?
 
 Example:
   moorctl diag stage1 --src-ip 192.168.10.100 --dst-ip 192.168.10.0 --dst-port 1000`,
@@ -79,17 +79,24 @@ func runDiagStage1(_ *cobra.Command, _ []string) error {
 	tcErr := tc.Lookup(tcKey, &tcVal)
 	diagCheck("target_cidrs[src=%s]", tcErr, diagSrcIP)
 
-	// ── 2. ext_ip_pool ────────────────────────────────────────────────────────
-	ep, err := ebpf.LoadPinnedMap(diagMapsDir+"/ext_ip_pool", nil)
+	// ── 2. dst_kind ───────────────────────────────────────────────────────────
+	dk, err := ebpf.LoadPinnedMap(diagMapsDir+"/dst_kind", nil)
 	if err != nil {
-		return fmt.Errorf("open ext_ip_pool: %w", err)
+		return fmt.Errorf("open dst_kind: %w", err)
 	}
-	defer ep.Close()
+	defer dk.Close()
 
-	epKey := mooringbpf.RevnatIngressLpmKey{Prefixlen: 32, Addr: dstU32}
-	var epVal uint8
-	epErr := ep.Lookup(epKey, &epVal)
-	diagCheck("ext_ip_pool[dst=%s]", epErr, diagDstIP)
+	var kindVal uint8
+	kindErr := dk.Lookup(dstU32, &kindVal)
+	if kindErr == nil {
+		kindName := map[uint8]string{1: "EXT_IP", 2: "POD_IP"}[kindVal]
+		fmt.Printf("  %-55s  FOUND -> kind=%s\n", fmt.Sprintf("dst_kind[dst=%s]", diagDstIP), kindName)
+	} else {
+		diagCheck("dst_kind[dst=%s]", kindErr, diagDstIP)
+	}
+	if kindErr != nil || kindVal != 1 { // not DST_KIND_EXT_IP -- stage 1 (port_range_lookup) never runs
+		return nil
+	}
 
 	// ── 3. port_range_lookup (HASH_OF_MAPS) ──────────────────────────────────
 	pl, err := ebpf.LoadPinnedMap(diagMapsDir+"/"+portRangeMap, nil)
