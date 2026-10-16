@@ -72,7 +72,7 @@ var extIPCIDR string
 
 var extIPAddCmd = &cobra.Command{
 	Use:   "add",
-	Short: "Add an external IP CIDR to the pool",
+	Short: "Mark a CIDR's IPs as DST_KIND_EXT_IP in the dst_kind map",
 	RunE:  runExtIPAdd,
 }
 
@@ -81,7 +81,7 @@ func runExtIPAdd(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --cidr: %w", err)
 	}
-	return maps.AddExtIP(cidr)
+	return maps.AddExtIPKind(cidr)
 }
 
 // ── port-range ────────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ func init() {
 	targetCIDRAddCmd.Flags().StringVar(&tcCIDR, "cidr", "", "destination CIDR (required)")
 	_ = targetCIDRAddCmd.MarkFlagRequired("cidr")
 
-	extIPCmd := &cobra.Command{Use: "ext-ip", Short: "Manage the ext_ip_pool map"}
+	extIPCmd := &cobra.Command{Use: "ext-ip", Short: "Manage the ext-IP side of the dst_kind map"}
 	mapCmd.AddCommand(extIPCmd)
 	extIPCmd.AddCommand(extIPAddCmd)
 	extIPAddCmd.Flags().StringVar(&extIPCIDR, "cidr", "", "external IP CIDR (required)")

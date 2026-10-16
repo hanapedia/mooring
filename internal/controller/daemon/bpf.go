@@ -12,10 +12,18 @@ type TargetCIDRMap interface {
 	Remove(cidr *net.IPNet) error
 }
 
-// ExtIPPoolMap abstracts the ext_ip_pool LPM BPF map.
-type ExtIPPoolMap interface {
+// ExtIPKindMap abstracts the "mark these CIDR's IPs as DST_KIND_EXT_IP"
+// side of the dst_kind BPF map.
+type ExtIPKindMap interface {
 	Add(cidr *net.IPNet) error
 	Remove(cidr *net.IPNet) error
+}
+
+// PodIPKindMap abstracts the "mark this pod IP as DST_KIND_POD_IP" side of
+// the dst_kind BPF map.
+type PodIPKindMap interface {
+	Add(podIP net.IP) error
+	Remove(podIP net.IP) error
 }
 
 // PortRangeLookupMap abstracts the port_range_lookup HASH_OF_MAPS BPF map
@@ -39,11 +47,17 @@ type RealTargetCIDRMap struct{}
 func (RealTargetCIDRMap) Add(cidr *net.IPNet) error    { return maps.AddTargetCIDR(cidr) }
 func (RealTargetCIDRMap) Remove(cidr *net.IPNet) error { return maps.RemoveTargetCIDR(cidr) }
 
-// RealExtIPPoolMap is the production implementation of ExtIPPoolMap.
-type RealExtIPPoolMap struct{}
+// RealExtIPKindMap is the production implementation of ExtIPKindMap.
+type RealExtIPKindMap struct{}
 
-func (RealExtIPPoolMap) Add(cidr *net.IPNet) error    { return maps.AddExtIP(cidr) }
-func (RealExtIPPoolMap) Remove(cidr *net.IPNet) error { return maps.RemoveExtIP(cidr) }
+func (RealExtIPKindMap) Add(cidr *net.IPNet) error    { return maps.AddExtIPKind(cidr) }
+func (RealExtIPKindMap) Remove(cidr *net.IPNet) error { return maps.RemoveExtIPKind(cidr) }
+
+// RealPodIPKindMap is the production implementation of PodIPKindMap.
+type RealPodIPKindMap struct{}
+
+func (RealPodIPKindMap) Add(podIP net.IP) error    { return maps.AddPodIPKind(podIP) }
+func (RealPodIPKindMap) Remove(podIP net.IP) error { return maps.RemovePodIPKind(podIP) }
 
 // RealPortRangeLookupMap is the production implementation of PortRangeLookupMap.
 type RealPortRangeLookupMap struct{}

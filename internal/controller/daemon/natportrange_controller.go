@@ -16,8 +16,13 @@ import (
 var syncProtos = []uint8{6, 17, 1} // TCP, UDP, ICMP
 
 // syncedNPR is the last-known state of an NPR, stored so reconcile can compute
-// a minimal diff rather than a full teardown/rebuild on every update.
+// a minimal diff rather than a full teardown/rebuild on every update. PodIP
+// and NodeName are cached (even for remote-node NPRs) so syncStale can decide
+// whether to remove a dst_kind pod-IP entry without needing another NPR's
+// own spec -- see maybeRemovePodIPKind.
 type syncedNPR struct {
+	PodIP       string
+	NodeName    string
 	TargetCIDRs []string
 	Allocations []v1alpha1.PortAllocation
 }
@@ -27,16 +32,18 @@ type NATPortRangeSyncReconciler struct {
 	NodeName        string
 	PortRangeLookup PortRangeLookupMap
 	NatConfig       NatConfigMap
+	PodIPKind       PodIPKindMap
 	mu              sync.Mutex
 	synced          map[string]syncedNPR // key: NPR name
 }
 
-func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, natConfig NatConfigMap) *NATPortRangeSyncReconciler {
+func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, natConfig NatConfigMap, podIPKind PodIPKindMap) *NATPortRangeSyncReconciler {
 	return &NATPortRangeSyncReconciler{
 		Client:          c,
 		NodeName:        nodeName,
 		PortRangeLookup: portRangeLookup,
 		NatConfig:       natConfig,
+		PodIPKind:       podIPKind,
 		synced:          make(map[string]syncedNPR),
 	}
 }
@@ -90,6 +97,13 @@ func (r *NATPortRangeSyncReconciler) syncStale(ctx context.Context, npr *v1alpha
 				return ctrl.Result{}, fmt.Errorf("remove nat config allocs for CIDR %s: %w", cidrStr, err)
 			}
 		}
+
+		// dst_kind (pod-IP side): a pod can match multiple NATConfigs (multiple
+		// NPRs, same PodIP), so only remove the entry once no other
+		// locally-synced NPR still references this pod IP.
+		if err := r.maybeRemovePodIPKind(npr.Name, npr.Spec.PodIP, podIP); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	r.mu.Lock()
@@ -127,6 +141,15 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 	}
 
 	if npr.Spec.NodeName == r.NodeName {
+		// dst_kind (pod-IP side): Put is idempotent, so just always ensure the
+		// entry exists for a local NPR rather than tracking "first sync" --
+		// ref-counting only matters on removal (syncStale/maybeRemovePodIPKind),
+		// where wrongly evicting an entry a sibling NPR still needs would be
+		// the actual mistake.
+		if err := r.PodIPKind.Add(podIP); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add dst_kind pod ip: %w", err)
+		}
+
 		removedCIDRs, addedCIDRs, commonCIDRs := diffStringSlices(cachedCIDRsCopy, npr.Spec.TargetCIDRs)
 
 		// Dropped target CIDRs: remove the entire nat_config entry for that CIDR.
@@ -191,11 +214,41 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 
 	r.mu.Lock()
 	r.synced[npr.Name] = syncedNPR{
+		PodIP:       npr.Spec.PodIP,
+		NodeName:    npr.Spec.NodeName,
 		TargetCIDRs: append([]string(nil), npr.Spec.TargetCIDRs...),
 		Allocations: append([]v1alpha1.PortAllocation(nil), npr.Spec.Allocations...),
 	}
 	r.mu.Unlock()
 	return ctrl.Result{}, nil
+}
+
+// maybeRemovePodIPKind removes podIP's DST_KIND_POD_IP entry from dst_kind
+// unless another locally-synced NPR (for a different NATConfig matching the
+// same pod) still references it -- the same ref-counting shape
+// NATConfigReconciler.cidrUsedByOther already uses for CIDRs shared across
+// NATConfigs, applied here to pod IPs shared across a pod's NPRs. excludeName
+// is the NPR currently being torn down, so it never counts against itself.
+func (r *NATPortRangeSyncReconciler) maybeRemovePodIPKind(excludeName, podIPStr string, podIP net.IP) error {
+	r.mu.Lock()
+	stillUsed := false
+	for name, s := range r.synced {
+		if name == excludeName {
+			continue
+		}
+		if s.PodIP == podIPStr && s.NodeName == r.NodeName {
+			stillUsed = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	if stillUsed {
+		return nil
+	}
+	if err := r.PodIPKind.Remove(podIP); err != nil {
+		return fmt.Errorf("remove dst_kind pod ip: %w", err)
+	}
+	return nil
 }
 
 func (r *NATPortRangeSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {

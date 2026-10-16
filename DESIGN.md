@@ -68,14 +68,22 @@ management is required.
 | TCX ingress (head) | node uplink | ingress | Combined stage 1 + 2 revNAT |
 
 The egress program matches outbound packets by looking up the source pod IP in the nat_config
-map. The ingress program handles both revNAT stages in a single pass:
+map. The ingress program handles both revNAT stages in a single pass. It first classifies the
+destination with a single exact-match lookup in `dst_kind` (see [BPF Maps](#bpf-maps)) — a miss
+means the packet was never meant for mooring at all (e.g. another system, such as coil's Egress
+feature, happens to share the same `targetCIDRs`), and it is passed through untouched without
+even an LPM walk. Only once dst matches does it check src against `target_cidrs` — a secondary
+filter at that point, not a correctness boundary (`nat_map`'s exact src match is the real
+authority), worth paying for only because dst is already known to be ours:
 
-- If the destination is a known external IP, it performs stage 1 (IP revNAT) and then attempts
-  stage 2 immediately — the **same-node optimization** succeeds when `nat_map` has a revnat entry
-  for the pod (i.e., the pod is local). If it misses, the packet is forwarded by BGP
-  to the pod's node where the uplink ingress program there handles stage 2.
-- If the destination is already a pod IP (cross-node: stage 1 ran on another node), stage 2 is
-  performed directly.
+- If `dst_kind` resolves `EXT_IP`, it performs stage 1 (IP revNAT) and then attempts stage 2
+  immediately — the **same-node optimization** succeeds when `nat_map` has a revnat entry for the
+  pod (i.e., the pod is local). If it misses, the packet is forwarded by BGP to the pod's node
+  where the uplink ingress program there handles stage 2.
+- If `dst_kind` resolves `POD_IP` (dst is one of this node's local client pods — cross-node: stage
+  1 ran on another node, or this traffic was never a tracked NAT flow at all), stage 2 is attempted
+  directly; a `nat_map` miss here is passed through, not redirected, since no rewrite happened this
+  pass to justify forwarding it anywhere.
 
 **Conntrack bypass:** on a transit node (stage 1 ran here, pod is on another node), conntrack
 would see the rewritten SYN-ACK as a new, untracked connection and mark it INVALID — causing
@@ -445,6 +453,45 @@ LPM trie keyed on destination IP; hit means the packet is a candidate for SNAT.
 
 Type: `BPF_MAP_TYPE_LPM_TRIE`. The value stores the CIDR identity redundantly so the egress program can recover _which_ CIDR matched from the lookup result (BPF LPM returns the value of the matching entry, not its key) and construct the `nat_config` compound key.
 
+### dst_kind map (ingress, all nodes)
+
+A single exact-match hash classifies an ingress packet's destination in one lookup: is it one of
+mooring's external IPs (stage 1 candidate), one of this node's local client pods (stage 2
+candidate), or neither (not meant for mooring at all, independent of what src matched against
+`target_cidrs`).
+
+| Field | Role |
+|---|---|
+| Key: `dst-IP` | exact match, no LPM trie walk |
+| Value: `kind` — `EXT_IP` or `POD_IP` | A miss means "not ours"; no implicit assumption either way |
+
+Type: `BPF_MAP_TYPE_HASH`. Replaces the earlier `ext_ip_pool` LPM map, and closes a real bug that
+map's design permitted: a dst that wasn't an ext IP used to be *assumed* already a tracked pod IP
+(stage 1 having run on another node) with no verification at all. Traffic belonging to another
+system entirely — e.g. a coil `Egress` resource configured with the same `targetCIDRs` as a
+mooring `NATConfig` — satisfied that assumption (src in `target_cidrs`, dst not an ext IP) and got
+treated as an already-stage1'd mooring flow, then forcibly redirected via `ctx_redirect_transit` on
+the inevitable `nat_map` miss instead of being left alone. `dst_kind` makes "is this dst actually
+ours" an explicit, single-lookup check instead of an implicit either/or.
+
+The two kinds are populated independently, by different controllers, at different scopes, since
+each can only be known where its own data lives:
+
+- **`EXT_IP`** entries are written **cluster-wide** (every node), because stage 1 can run on any
+  node via BGP ECMP. Same event source as `target_cidrs`/the old `ext_ip_pool`
+  (`NATConfig.Spec.ExternalIPPool`), by the daemon's NATConfig controller — CIDRs are expanded to
+  individual IPs (the same granularity `port_range_lookup`'s outer map already uses) rather than
+  stored as LPM ranges.
+- **`POD_IP`** entries are written **local-node-only**, by the daemon's NATPortRange sync
+  controller, because stage 2 only ever completes on the pod's own node (same locality
+  `nat_map`/`nat_config` already have). Lifecycle is control-plane driven, not datapath-populated
+  or aged — a pod matching multiple NATConfigs (multiple NPRs, same pod IP) is ref-counted the same
+  way `target_cidrs`/`ext_ip_pool` CIDRs shared across NATConfigs already are, so the entry is only
+  removed once no NPR for that pod remains local to this node.
+
+Ext IPs and pod IPs are architecturally disjoint address spaces (external pool vs. cluster pod
+CIDR), so the two kinds sharing one map carries no collision risk.
+
 ---
 
 ## Packet Flow
@@ -481,20 +528,33 @@ external server
 Any node (BGP ECMP)
   ▼
 TCX ingress (head) — node uplink  (combined stage 1+2 revNAT, all nodes)
-  │  checks src-IP against target_cidrs
+  │  single dst_kind[dst-IP] lookup — classifies dst before any LPM walk or
+  │  L4 parsing; the primary filter, since most ingress traffic has nothing
+  │  to do with mooring and is rejected here by one hash lookup
+  │    miss → pass, untouched (e.g. coil's own traffic sharing a destination
+  │           range with a mooring NATConfig)
+  │  dst matched → checks src-IP against target_cidrs (secondary filter, now
+  │  worth an LPM walk since dst is already ours — keeps unauthenticated
+  │  noise from reaching port_range_lookup/nat_map; not a correctness
+  │  boundary either way, since nat_map's exact src match is the real
+  │  authority below)
+  │    miss → pass, untouched
   │
-  │  [case A] dst ∈ external IP pool  → Stage 1
+  │  [case A] dst_kind = EXT_IP  → Stage 1
   │    looks up port-range-map[externalIP][NAT-port] → pod-IP
   │    rewrites dst: externalIP → pod-IP
   │    attempts Stage 2 (same-node optimization):
   │      nat_map revnat hit  → rewrites dst-port: NAT-port → pod-port
   │                          → client pod ✓
-  │      nat_map revnat miss → pod is on another node
+  │      nat_map revnat miss → pod is on another node (dst was just rewritten
+  │                             this pass, so a miss here is a genuine transit case)
   │                          → BGP routes pod-IP packet to pod's node → [case B]
   │
-  │  [case B] dst ∈ pod CIDR  → Stage 2 (cross-node return)
+  │  [case B] dst_kind = POD_IP  → Stage 2 (cross-node return, or direct)
   │    looks up nat_map revnat entry: {server-IP, server-port, pod-IP, NAT-port} → {externalIP, pod-port}
-  │    rewrites dst-port: NAT-port → pod-port
+  │    hit  → rewrites dst-port: NAT-port → pod-port
+  │    miss → pass, untouched (no rewrite happened this pass to justify
+  │           forwarding anywhere — this was never a tracked NAT flow)
   ▼
 client pod  (src=server-IP:server-port, dst=pod-IP:pod-port ✓)
 ```
@@ -631,8 +691,8 @@ whose pod is absent — covering pods that were deleted while the daemon was dow
 #### NATConfig controller
 
 Watches: NATConfig (cluster-scoped) and the local Node object, cache-filtered to
-`metadata.name == NODE_NAME` via a per-object cache field selector. Manages the `target_cidrs`
-and `ext_ip_pool` LPM BPF maps on all nodes, and drives BGP route advertisement via the
+`metadata.name == NODE_NAME` via a per-object cache field selector. Manages the `target_cidrs` LPM
+map and the `EXT_IP` side of `dst_kind` on all nodes, and drives BGP route advertisement via the
 `RouteAdvertiser` interface.
 
 Maintains three separate in-memory per-NATConfig tracking maps:
@@ -645,7 +705,7 @@ participating in BGP advertisement.
 
 On any NATConfig or local Node label-change event:
 - Computes desired BPF CIDRs from the current spec (empty if deleted).
-- Updates `target_cidrs` and `ext_ip_pool` BPF maps unconditionally on all nodes.
+- Updates `target_cidrs` and `dst_kind` (ext-IP side) unconditionally on all nodes.
 - Evaluates `spec.nodeSelector` against this node's labels to determine `desiredRouteCIDRs`:
   empty if the node does not match; equal to `externalIPPool` if it matches (or if
   `nodeSelector` is nil — the default, which matches all nodes).
@@ -670,9 +730,19 @@ pods via `EnqueueRequestsFromMapFunc`). The NATConfig controller has no field in
 
 Watches: NATPortRange (all nodes watch all resources).
 
-Maintains an in-memory cache (`map[string]{TargetCIDRs, Allocations}`, key: NPR name) tracking
-what was last written to BPF maps. The cache starts empty at daemon startup — the first reconcile
-of each NPR re-adds all current allocations, idempotently repopulating the maps after a restart.
+Maintains an in-memory cache (`map[string]{PodIP, NodeName, TargetCIDRs, Allocations}`, key: NPR
+name) tracking what was last written to BPF maps. The cache starts empty at daemon startup — the
+first reconcile of each NPR re-adds all current allocations, idempotently repopulating the maps
+after a restart.
+
+Also drives the `POD_IP` side of `dst_kind` (local node only, mirroring `nat_config`'s locality):
+on a local NPR's first sync, unconditionally `Add`s the pod IP (idempotent — a pod matching
+multiple NATConfigs means multiple NPRs share the same pod IP, so there's no "first" to detect
+cheaply, and re-adding an already-present entry is a no-op). On teardown, scans the cache for any
+*other* local NPR still referencing the same pod IP before calling `Remove` — the same
+ref-counting shape `NATConfigReconciler` already uses for CIDRs shared across NATConfigs, applied
+here to pod IPs shared across a pod's NPRs, so the entry is only removed once no NPR for that pod
+remains local to this node.
 
 **Daemon finalizer** (`mooring.hanapedia.link/bpf-sync`): added to the NPR at the end of the
 first successful `syncAlive`. It prevents Kubernetes from fully deleting the NPR until
@@ -684,8 +754,10 @@ therefore always means "this daemon never synced the NPR" and requires no BPF ac
 - **DeletionTimestamp set**: removes all entries in `spec.Allocations` from
   `port_range_lookup_{tcp,udp,icmp}` (all nodes). If `spec.nodeName == NODE_NAME`, iterates
   `spec.TargetCIDRs` and calls `RemoveNatConfigAllocs(podIP, cidr, uniqueExtIPs)` for each target CIDR
-  to remove that pod's `nat_config` entries, leaving allocations from other pods intact. Removes
-  the `mooring.hanapedia.link/bpf-sync` finalizer, then clears the cache entry.
+  to remove that pod's `nat_config` entries, leaving allocations from other pods intact, then
+  removes the pod's `dst_kind` `POD_IP` entry unless another local NPR still references it (see
+  ref-counting above). Removes the `mooring.hanapedia.link/bpf-sync` finalizer, then clears the
+  cache entry.
 - **No DeletionTimestamp**: computes a minimal diff across two dimensions:
   - *Allocation diff* (`toRemove`, `toAdd`): from `spec.Allocations` vs cached allocations.
   - *Target-CIDR diff* (`removedCIDRs`, `addedCIDRs`, `commonCIDRs`): from `spec.TargetCIDRs`

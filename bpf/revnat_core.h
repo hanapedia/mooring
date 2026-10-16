@@ -15,31 +15,30 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
-// Stage 2: rewrite nat_port back to the original pod_port for a packet whose
-// destination is now a pod IP (either because stage1 just ran in this same
-// pass, or because it arrived on the pod's own node after stage1 ran
-// remotely). csum_off is the byte offset of the port/id checksum field
-// (tcph->check / udph->check / icmph->checksum), computed once by the
-// caller during L4 parsing.
+// Looks up the nat_map revnat entry for the (server_ip, pod_ip, server_port,
+// nat_port, proto) tuple implied by the current packet -- dst must already
+// be pod_ip by the time this is called (stage 1, if any, has already run
+// this pass). Returns NULL on a miss; callers decide what that means (a
+// genuine cross-node transit candidate vs. traffic that was never a tracked
+// mooring flow at all) -- this function has no opinion either way, see
+// revnat_core's two call sites.
 //
 // Re-derives packet pointers from ctx so callers that have already invoked
 // a csum helper (which, on the skb/TC side, can invalidate PTR_TO_PACKET
 // registers) can safely call this.
-static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 nat_port,
-                                          __be16 server_port,
-                                          __u32 csum_off) {
+static __always_inline struct nat_map_val *
+lookup_revnat_entry(__ctx_buff *ctx, __be16 nat_port, __be16 server_port) {
   void *data = ctx_data(ctx);
   void *data_end = ctx_data_end(ctx);
 
   struct ethhdr *eth = data;
   if ((void *)(eth + 1) > data_end)
-    return CTX_PASS;
+    return NULL;
 
   struct iphdr *iph = (void *)(eth + 1);
   if ((void *)(iph + 1) > data_end)
-    return CTX_PASS;
+    return NULL;
 
-  // look up the revnat entry in nat_map to see if the pod is local
   struct nat_map_key revnat_key = {
       .ip_a = iph->saddr, // server_ip
       .ip_b = iph->daddr, // pod_ip
@@ -48,15 +47,80 @@ static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 nat_port,
       .proto = iph->protocol,
       .kind = NAT_ENTRY_REVNAT,
   };
-  struct nat_map_val *nv = bpf_map_lookup_elem(&nat_map, &revnat_key);
-  if (!nv) {
-    // bpf_printk("revnat: stage2 not-local src=%x dst=%x port=%u\n",
-    //            bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
-    //            bpf_ntohs(nat_port));
-    return ctx_redirect_transit(ctx);
-  }
+  // bpf_printk("revnat: lookup src=%x dst=%x port=%u\n",
+  //            bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
+  //            bpf_ntohs(nat_port));
+  return bpf_map_lookup_elem(&nat_map, &revnat_key);
+}
 
-  __be16 pod_port = nv->port;
+// Builds the revnat/snat key pair for the current flow and hands off to the
+// shared TCP close state machine (track_tcp_close, maps.h) -- nv (already
+// found by lookup_revnat_entry) is "own" (the revnat entry); the paired snat
+// entry is "peer". No packet access -- every scalar here is something the
+// caller already has in hand (safe to use regardless of any csum helper
+// that may have run since it was captured).
+//
+// Takes pod_port explicitly rather than reading nv->port itself: track_tcp_close
+// can delete nv's own backing map entry on a confirmed close, so the caller
+// must have already cached pod_port as a plain scalar *before* calling this
+// -- see do_port_revnat below, which is called with that same cached value
+// rather than nv, for exactly this reason.
+static __always_inline void revnat_track_tcp_close(__be32 server_ip,
+                                                    __be32 pod_ip,
+                                                    __be16 server_port,
+                                                    __be16 nat_port,
+                                                    __be16 pod_port,
+                                                    struct nat_map_val *nv,
+                                                    __u8 fin, __u8 rst,
+                                                    __u8 ack) {
+  struct nat_map_key revnat_key = {
+      .ip_a = server_ip,
+      .ip_b = pod_ip,
+      .port_a = server_port,
+      .port_b = nat_port,
+      .proto = IPPROTO_TCP,
+      .kind = NAT_ENTRY_REVNAT,
+  };
+  struct nat_map_key snat_key = {
+      .ip_a = pod_ip,
+      .ip_b = server_ip,
+      .port_a = pod_port,
+      .port_b = server_port,
+      .proto = IPPROTO_TCP,
+      .kind = NAT_ENTRY_SNAT,
+  };
+  track_tcp_close(&revnat_key, nv, &snat_key, fin, rst, ack);
+}
+
+// Stage 2: rewrite nat_port back to pod_port for a packet whose destination
+// is already pod_ip. csum_off is the byte offset of the port/id checksum
+// field (tcph->check / udph->check / icmph->checksum), computed once by the
+// caller during L4 parsing.
+//
+// Takes pod_port as a plain scalar rather than the nat_map_val it came from
+// -- this is purely the rewrite now (TCP close tracking is the caller's job,
+// see revnat_track_tcp_close above), and the scalar is also what keeps this
+// safe to call *after* revnat_track_tcp_close, which may have already
+// deleted the map entry pod_port was read from.
+//
+// Always returns CTX_PASS: by the time this is called, the only decision
+// left (redirect vs. pass on a nat_map miss) has already been made by the
+// caller via lookup_revnat_entry's result.
+//
+// Re-derives packet pointers from ctx for the same reason
+// lookup_revnat_entry does.
+static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 pod_port,
+                                          __be16 nat_port, __u32 csum_off) {
+  void *data = ctx_data(ctx);
+  void *data_end = ctx_data_end(ctx);
+
+  struct ethhdr *eth = data;
+  if ((void *)(eth + 1) > data_end)
+    return CTX_PASS; // unreachable in practice -- caller already bounds-checked this
+
+  struct iphdr *iph = (void *)(eth + 1);
+  if ((void *)(iph + 1) > data_end)
+    return CTX_PASS; // unreachable in practice -- caller already bounds-checked this
 
   // rewrite headers before the csum helper -- on the skb/TC side,
   // bpf_l4_csum_replace calls skb_make_writable internally, which can
@@ -64,47 +128,17 @@ static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 nat_port,
   if (iph->protocol == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
-      return CTX_PASS;
-
-    // Mirror of the connection tracking in snat_egress.c, for the
-    // server->pod direction (a server-initiated FIN/RST, or the server's
-    // ACK confirming a pod-initiated close, never appears on the egress
-    // path). See snat_egress.c's try_alloc_port for the matching stale-entry
-    // reclaim during allocation.
-    struct nat_map_key snat_key = {
-        .ip_a = revnat_key.ip_b, // pod_ip
-        .ip_b = revnat_key.ip_a, // server_ip
-        .port_a = pod_port,
-        .port_b = revnat_key.port_a, // server_port
-        .proto = IPPROTO_TCP,
-        .kind = NAT_ENTRY_SNAT,
-    };
-    if (nv->closing_ns) {
-      // See snat_egress.c for why this requires a second FIN/RST rather than
-      // a plain ACK (half-closed connections would otherwise be torn down
-      // while one direction is still flowing).
-      if ((tcph->fin || tcph->rst) && tcph->ack) {
-        bpf_map_delete_elem(&nat_map, &revnat_key);
-        bpf_map_delete_elem(&nat_map, &snat_key);
-      }
-    } else if (tcph->fin || tcph->rst) {
-      __u64 now = bpf_ktime_get_ns();
-      nv->closing_ns = now;
-      struct nat_map_val *sv = bpf_map_lookup_elem(&nat_map, &snat_key);
-      if (sv)
-        sv->closing_ns = now;
-    }
-
+      return CTX_PASS; // unreachable in practice -- caller already bounds-checked this
     tcph->dest = pod_port;
   } else if (iph->protocol == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
-      return CTX_PASS;
+      return CTX_PASS; // unreachable in practice -- caller already bounds-checked this
     udph->dest = pod_port;
   } else { // ICMP (use port as id)
     struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(icmph + 1) > data_end)
-      return CTX_PASS;
+      return CTX_PASS; // unreachable in practice -- caller already bounds-checked this
     icmph->un.echo.id = pod_port;
   }
 
@@ -118,18 +152,33 @@ static __always_inline int do_port_revnat(__ctx_buff *ctx, __be16 nat_port,
 }
 
 /*
- * Is src in target cidr
- * - yes -> continue
- * - no -> early exit
- * Is dest ext ip?
- * - yes -> stage 1
- *   nat_table hit? (pod is local)
- *   - yes -> stage2
- * - no -> is dest pod_ip with nat_table hit?
- *   - yes ->
- * Need to check if the packet's dest is any of the external IPs.
- * Look up dest IP + port to find client pod
- * rewrite header with pod IP.
+ * Is dest a known mooring IP, and which kind? (single dst_kind hash lookup,
+ * before any LPM walk or L4 parsing)
+ * - miss -> not meant for mooring at all (e.g. another system, such as
+ *           coil's Egress feature, sharing a destination range with a
+ *           mooring NATConfig) -> CTX_PASS. This is the cheap primary
+ *           filter: the overwhelming majority of ingress traffic has
+ *           nothing to do with mooring and is rejected here by one hash
+ *           lookup, never touching target_cidrs or any other map.
+ * - hit  -> is src in target_cidrs? A secondary filter, now worth paying
+ *           for (an LPM walk) only because dst already matched one of our
+ *           own IPs: it catches traffic that guessed/spoofed a live
+ *           ext-IP+port or local pod IP but isn't actually coming from a
+ *           server this pod talks to, before it can reach port_range_lookup
+ *           or trigger a cross-node ctx_redirect_transit attempt. It is
+ *           *not* a correctness boundary either way -- lookup_revnat_entry's
+ *           nat_map lookup, keyed on the exact src IP+port, is the real
+ *           authority in both branches below; this just keeps unauthenticated
+ *           noise from reaching that far.
+ * - no   -> CTX_PASS
+ * - EXT_IP -> stage 1: resolve pod_ip from the port, rewrite dst, then look
+ *             up the nat_map revnat entry (lookup_revnat_entry): found ->
+ *             stage 2 (do_port_revnat); not found -> the pod lives on
+ *             another node -> forward it (ctx_redirect_transit)
+ * - POD_IP -> same lookup, but a miss doesn't change the outcome here --
+ *             this was never a tracked NAT flow, so just CTX_PASS the same
+ *             as a hit (which already rewrote the packet in place); never
+ *             redirect
  */
 static __always_inline int revnat_core(__ctx_buff *ctx) {
   void *data = ctx_data(ctx);
@@ -148,32 +197,66 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
   if ((void *)(iph + 1) > data_end)
     return CTX_PASS;
 
-  // look up src against target_cidrs
+  // Captured as plain scalars (never re-read from iph later in this
+  // function) so they stay valid regardless of any csum helper that may run
+  // in between -- on the skb/TC side, bpf_l3/l4_csum_replace call
+  // skb_make_writable internally, which can invalidate PTR_TO_PACKET
+  // registers, including iph itself. src and protocol never change; dst
+  // only changes (ext_ip -> pod_ip) in the EXT_IP branch below, where the
+  // rewritten value is itself captured as pod_ip.
+  __be32 server_ip = iph->saddr;
+  __be32 daddr = iph->daddr;
+  __u8 proto = iph->protocol;
+
+  // Single exact-match lookup classifying dst, before any L4 parsing or LPM
+  // walk. A miss here is the fix for a real bug: previously, a dst that
+  // wasn't an ext IP was *assumed* to already be a tracked pod IP (stage 1
+  // having run on another node) with no verification -- so traffic
+  // belonging to another system entirely got treated as an already-stage1'd
+  // mooring flow and, on the inevitable nat_map miss, was forcibly
+  // redirected instead of passed through. See bpf/headers/revnat_maps.h for
+  // dst_kind's lifecycle.
+  __u8 *kind_ptr = bpf_map_lookup_elem(&dst_kind, &daddr);
+  if (!kind_ptr) {
+    // bpf_printk("revnat: dst_kind miss src=%x dst=%x -- not mooring\n",
+    //            bpf_ntohl(server_ip), bpf_ntohl(daddr));
+    return CTX_PASS;
+  }
+  __u8 kind = *kind_ptr;
+
+  // dst matched one of our own IPs -- now worth the LPM cost of checking
+  // src, to filter unauthenticated noise before port_range_lookup/nat_map.
   struct lpm_key slpm = {
       .prefixlen = 32, /* match src IP exactly */
-      .addr = iph->saddr,
+      .addr = server_ip,
   };
   if (!bpf_map_lookup_elem(&target_cidrs, &slpm))
     return CTX_PASS;
 
   // handle only tcp, udp, or icmp
-  if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP &&
-      iph->protocol != IPPROTO_ICMP)
+  if (proto != IPPROTO_TCP && proto != IPPROTO_UDP && proto != IPPROTO_ICMP)
     return CTX_PASS;
 
-  // parse l4 header
+  // parse l4 header (shared by both DST_KIND_EXT_IP and DST_KIND_POD_IP).
+  // tcp_fin/tcp_rst/tcp_ack are captured as plain scalars here too, same
+  // reasoning as server_ip/daddr above -- revnat_track_tcp_close uses them
+  // well after any csum helper the EXT_IP branch below might run.
   __be16 nat_port, server_port;
   __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
   __u32 csum_off;
+  __u8 tcp_fin = 0, tcp_rst = 0, tcp_ack = 0;
 
-  if (iph->protocol == IPPROTO_TCP) {
+  if (proto == IPPROTO_TCP) {
     struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(tcph + 1) > data_end)
       return CTX_PASS;
     nat_port = tcph->dest;
     server_port = tcph->source;
     csum_off = l4_off + offsetof(struct tcphdr, check);
-  } else if (iph->protocol == IPPROTO_UDP) {
+    tcp_fin = tcph->fin;
+    tcp_rst = tcph->rst;
+    tcp_ack = tcph->ack;
+  } else if (proto == IPPROTO_UDP) {
     struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
     if ((void *)(udph + 1) > data_end)
       return CTX_PASS;
@@ -192,36 +275,38 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
     csum_off = l4_off + offsetof(struct icmphdr, checksum);
   }
 
-  // look up dest against ext ip pool
-  struct lpm_key dlpm = {
-      .prefixlen = 32, /* match dest IP exactly */
-      .addr = iph->daddr,
-  };
-  // dst is not an external IP — stage 1 already ran on another node and dst
-  // is now pod_ip. attempt stage 2 directly.
-  if (!bpf_map_lookup_elem(&ext_ip_pool, &dlpm)) {
-    // bpf_printk("revnat: stage2 path src=%x dst=%x\n", bpf_ntohl(iph->saddr),
-    //            bpf_ntohl(iph->daddr));
-    return do_port_revnat(ctx, nat_port, server_port, csum_off);
+  if (kind == DST_KIND_POD_IP) {
+    // dst is already a pod IP (stage 1 ran on another node, or this was
+    // never a tracked NAT flow at all). Either way, found or not, pass it
+    // through -- a hit rewrites in place; a miss means this was never a
+    // tracked flow.
+    struct nat_map_val *nv = lookup_revnat_entry(ctx, nat_port, server_port);
+    if (!nv)
+      return CTX_PASS;
+    __be16 pod_port = nv->port; // cache before revnat_track_tcp_close, which
+                                 // may delete nv's own backing map entry
+    if (proto == IPPROTO_TCP)
+      revnat_track_tcp_close(server_ip, daddr, server_port, nat_port,
+                             pod_port, nv, tcp_fin, tcp_rst, tcp_ack);
+    return do_port_revnat(ctx, pod_port, nat_port, csum_off);
   }
 
+  // DST_KIND_EXT_IP: stage 1 -- lookup per-protocol port range to find pod ip
   // bpf_printk("revnat: stage1 path src=%x dst=%x port=%u\n",
-  //            bpf_ntohl(iph->saddr), bpf_ntohl(iph->daddr),
-  //            bpf_ntohs(nat_port));
+  //            bpf_ntohl(server_ip), bpf_ntohl(daddr), bpf_ntohs(nat_port));
 
-  // lookup per-protocol port range to find pod ip
-  __be32 ext_ip = iph->daddr;
+  __be32 ext_ip = daddr;
   void *inner;
-  if (iph->protocol == IPPROTO_TCP) {
+  if (proto == IPPROTO_TCP) {
     inner = bpf_map_lookup_elem(&port_range_lookup_tcp, &ext_ip);
-  } else if (iph->protocol == IPPROTO_UDP) {
+  } else if (proto == IPPROTO_UDP) {
     inner = bpf_map_lookup_elem(&port_range_lookup_udp, &ext_ip);
   } else { // ICMP
     inner = bpf_map_lookup_elem(&port_range_lookup_icmp, &ext_ip);
   }
   if (!inner) {
     // bpf_printk("revnat: stage1 port_range miss ext=%x port=%u\n",
-    //            bpf_ntohl(iph->daddr), bpf_ntohs(nat_port));
+    //            bpf_ntohl(ext_ip), bpf_ntohs(nat_port));
     return CTX_PASS;
   }
   __u32 port_idx = bpf_ntohs(nat_port);
@@ -235,14 +320,25 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
   iph->daddr = pod_ip;
 
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
-  if (iph->protocol != IPPROTO_ICMP) {
+  if (proto != IPPROTO_ICMP) {
     ctx_l3_csum_replace(ctx, ip_csum, ext_ip, pod_ip);
     ctx_l4_csum_replace_ip(ctx, csum_off, ext_ip, pod_ip);
   } else {
     ctx_l3_csum_replace(ctx, ip_csum, ext_ip, pod_ip);
   }
 
-  // do_port_revnat re-derives its own packet pointers, so it is safe to
-  // call after the csum helpers above.
-  return do_port_revnat(ctx, nat_port, server_port, csum_off);
+  // lookup_revnat_entry re-derives its own packet pointers, so it is safe to
+  // call after the csum helpers above. dst was just rewritten this pass, so
+  // unlike the DST_KIND_POD_IP branch above, a miss here genuinely means
+  // the pod lives on another node -- forward it there rather than passing
+  // it through with an unrewritten port.
+  struct nat_map_val *nv = lookup_revnat_entry(ctx, nat_port, server_port);
+  if (!nv)
+    return ctx_redirect_transit(ctx);
+  __be16 pod_port = nv->port; // cache before revnat_track_tcp_close, which
+                               // may delete nv's own backing map entry
+  if (proto == IPPROTO_TCP)
+    revnat_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
+                           pod_port, nv, tcp_fin, tcp_rst, tcp_ack);
+  return do_port_revnat(ctx, pod_port, nat_port, csum_off);
 }

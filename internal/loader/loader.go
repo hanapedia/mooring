@@ -170,7 +170,7 @@ func loadRevnatTCX(ifindex int, mapReplacements map[string]*ebpf.Map) error {
 	defer objs.Close()
 
 	for name, m := range map[string]*ebpf.Map{
-		"ext_ip_pool":            objs.ExtIpPool,
+		"dst_kind":               objs.DstKind,
 		"port_range_lookup_tcp":  objs.PortRangeLookupTcp,
 		"port_range_lookup_udp":  objs.PortRangeLookupUdp,
 		"port_range_lookup_icmp": objs.PortRangeLookupIcmp,
@@ -246,7 +246,7 @@ func loadRevnatXDP(ifindex int, mapReplacements map[string]*ebpf.Map) error {
 	defer objs.Close()
 
 	for name, m := range map[string]*ebpf.Map{
-		"ext_ip_pool":            objs.ExtIpPool,
+		"dst_kind":               objs.DstKind,
 		"port_range_lookup_tcp":  objs.PortRangeLookupTcp,
 		"port_range_lookup_udp":  objs.PortRangeLookupUdp,
 		"port_range_lookup_icmp": objs.PortRangeLookupIcmp,

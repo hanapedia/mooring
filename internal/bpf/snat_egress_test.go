@@ -74,8 +74,6 @@ var _ = Describe("snat_egress", func() {
 			_, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: syn, DataOut: make([]byte, len(syn))})
 			Expect(err).NotTo(HaveOccurred())
 
-			// A later data packet on the same 4-tuple must reuse the same
-			// allocation via the sv-found branch, not re-run the allocator.
 			data := buildTCP(podIP, serverIP, podPort, serverPort, tcpACK)
 			out := make([]byte, len(data))
 			_, err = p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: data, DataOut: out})
@@ -174,10 +172,6 @@ var _ = Describe("snat_egress", func() {
 			revnatKey := natMapKey(serverIP, podIP, serverPort, extPort, protoTCP, natEntryREVNAT)
 
 			run(tcpSYN)
-
-			// First FIN+ACK marks both entries as closing without deleting
-			// them — covers the half-closed case (see snat_egress.c's
-			// try_alloc_port doc).
 			run(tcpFIN | tcpACK)
 
 			var snatVal bpf.SnatEgressNatMapVal
@@ -188,7 +182,6 @@ var _ = Describe("snat_egress", func() {
 			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed(), "revnat entry missing after first FIN")
 			Expect(revnatVal.ClosingNs).NotTo(BeZero(), "revnat entry not marked closing after first FIN")
 
-			// A second FIN+ACK confirms the close and reclaims both entries.
 			run(tcpFIN | tcpACK)
 
 			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).

@@ -106,26 +106,37 @@ func AddTargetCIDR(cidr *net.IPNet) error {
 	return m.Put(key, val)
 }
 
-// AddExtIP adds an external IP CIDR to the ext_ip_pool map used by the
-// ingress revNAT program to identify packets destined for our external IPs.
-func AddExtIP(cidr *net.IPNet) error {
-	ip4 := cidr.IP.To4()
-	if ip4 == nil {
-		return fmt.Errorf("only IPv4 CIDRs are supported")
+// dstKindExtIP / dstKindPodIP mirror the DST_KIND_EXT_IP / DST_KIND_POD_IP
+// #defines in bpf/headers/revnat_maps.h. bpf2go does not generate Go
+// constants for plain preprocessor defines (only for BTF-visible types), so
+// these must be kept in sync with the C side by hand.
+const (
+	dstKindExtIP uint8 = 1
+	dstKindPodIP uint8 = 2
+)
+
+// AddExtIPKind expands cidr into individual IPs and marks each as
+// DST_KIND_EXT_IP in the dst_kind map, so the ingress revNAT program
+// recognizes packets destined for our external IPs in a single exact-match
+// lookup. Written cluster-wide (every node), because stage 1 can run on any
+// node via BGP ECMP.
+func AddExtIPKind(cidr *net.IPNet) error {
+	ips, err := expandCIDR(cidr)
+	if err != nil {
+		return err
 	}
-	m, err := openMap("ext_ip_pool")
+	m, err := openMap("dst_kind")
 	if err != nil {
 		return err
 	}
 	defer m.Close()
 
-	ones, _ := cidr.Mask.Size()
-	key := mooringbpf.RevnatIngressLpmKey{
-		Prefixlen: uint32(ones),
-		Addr:      ipToUint32(ip4),
+	for _, ip := range ips {
+		if err := m.Put(ipToUint32(ip), dstKindExtIP); err != nil {
+			return fmt.Errorf("ext ip %s: %w", ip, err)
+		}
 	}
-	var val uint8 = 1
-	return m.Put(key, val)
+	return nil
 }
 
 // innerMapSpec matches the port_range_inner prototype in revnat_ingress.c:
@@ -292,27 +303,81 @@ func RemoveTargetCIDR(cidr *net.IPNet) error {
 	return nil
 }
 
-// RemoveExtIP deletes an external IP CIDR from the ext_ip_pool LPM map.
-func RemoveExtIP(cidr *net.IPNet) error {
-	ip4 := cidr.IP.To4()
-	if ip4 == nil {
-		return fmt.Errorf("only IPv4 CIDRs are supported")
+// RemoveExtIPKind expands cidr into individual IPs and deletes each from the
+// dst_kind map.
+func RemoveExtIPKind(cidr *net.IPNet) error {
+	ips, err := expandCIDR(cidr)
+	if err != nil {
+		return err
 	}
-	m, err := openMap("ext_ip_pool")
+	m, err := openMap("dst_kind")
 	if err != nil {
 		return err
 	}
 	defer m.Close()
 
-	ones, _ := cidr.Mask.Size()
-	key := mooringbpf.RevnatIngressLpmKey{
-		Prefixlen: uint32(ones),
-		Addr:      ipToUint32(ip4),
-	}
-	if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("remove ext IP %s: %w", cidr, err)
+	for _, ip := range ips {
+		if err := m.Delete(ipToUint32(ip)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("remove ext IP %s: %w", ip, err)
+		}
 	}
 	return nil
+}
+
+// AddPodIPKind marks podIP as DST_KIND_POD_IP in the dst_kind map. Written
+// local-node-only by NATPortRangeSyncReconciler, since stage 2 only ever
+// completes on the pod's own node (same locality as nat_map/nat_config).
+func AddPodIPKind(podIP net.IP) error {
+	m, err := openMap("dst_kind")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+	return m.Put(ipToUint32(podIP), dstKindPodIP)
+}
+
+// RemovePodIPKind deletes podIP's DST_KIND_POD_IP entry from the dst_kind map.
+func RemovePodIPKind(podIP net.IP) error {
+	m, err := openMap("dst_kind")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+	if err := m.Delete(ipToUint32(podIP)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("remove pod IP %s: %w", podIP, err)
+	}
+	return nil
+}
+
+// expandCIDR expands cidr into its individual IPv4 addresses. Ext IP pools
+// are documented as small blocks (e.g. a /28), so materializing every
+// address is cheap -- same assumption port_range_lookup already makes per
+// individual ext IP.
+func expandCIDR(cidr *net.IPNet) ([]net.IP, error) {
+	ip4 := cidr.IP.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("only IPv4 CIDRs are supported")
+	}
+	var ips []net.IP
+	for ip := cloneIP(ip4); cidr.Contains(ip); incrementIP(ip) {
+		ips = append(ips, cloneIP(ip))
+	}
+	return ips, nil
+}
+
+func cloneIP(ip net.IP) net.IP {
+	clone := make(net.IP, len(ip))
+	copy(clone, ip)
+	return clone
+}
+
+func incrementIP(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
 }
 
 // RemovePortRange zeros out the pod_ip entries for [portStart, portEnd] in the

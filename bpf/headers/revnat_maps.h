@@ -11,15 +11,34 @@
 // mode. Kept out of maps.h (rather than folded in there) so snat_egress.c,
 // which never touches these, doesn't end up with unused map definitions in
 // its own compiled object.
+
+// dst_kind classifies an ingress packet's destination IP in a single exact
+// (hash, not LPM) lookup: is it one of our external IPs (stage 1 candidate),
+// one of this node's local client pod IPs (stage 2 candidate), or neither
+// (not meant for mooring at all -- e.g. another system, such as coil's
+// Egress feature, sharing the same target CIDR as a mooring NATConfig). A
+// miss is the authoritative "not ours" answer; revnat_core relies on it to
+// avoid treating unrelated traffic as an already-stage1'd mooring flow.
+//
+// DST_KIND_EXT_IP entries are written cluster-wide (every node), because
+// stage 1 can run on any node via BGP ECMP. DST_KIND_POD_IP entries are
+// written local-node-only (stage 2 only ever completes on the pod's own
+// node, same as nat_map/nat_config), with their lifecycle driven entirely by
+// the control plane (NATPortRangeSyncReconciler) -- never by the datapath --
+// so the map never needs LRU eviction or staleness handling.
+#define DST_KIND_EXT_IP 1
+#define DST_KIND_POD_IP 2
+
+// Still used below to size port_range_lookup_*'s outer HASH_OF_MAPS -- those
+// remain keyed on individual ext IPs regardless of dst_kind.
 #define MAX_EXT_IPS 256
 
 struct {
-  __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-  __uint(map_flags, BPF_F_NO_PREALLOC);
-  __uint(max_entries, MAX_EXT_IPS);
-  __type(key, struct lpm_key);
-  __type(value, __u8);
-} ext_ip_pool SEC(".maps");
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 8192); // expanded ext IPs + local client pod IPs
+  __type(key, __be32);       // dst_ip, network byte order
+  __type(value, __u8);       // DST_KIND_EXT_IP or DST_KIND_POD_IP
+} dst_kind SEC(".maps");
 
 // inner map indicating port allocation for an ext ip
 struct port_range_inner_t {

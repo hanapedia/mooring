@@ -20,7 +20,7 @@ var _ = Describe("NATConfig controller", func() {
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
 			eventually(func() bool { return mockTargetCIDR.hasAdded(targetCIDR) })
-			eventually(func() bool { return mockExtIPPool.hasAdded(extCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasAdded(extCIDR) })
 		})
 
 		It("removes target CIDRs and ext IPs from BPF on NATConfig deletion", func() {
@@ -35,7 +35,7 @@ var _ = Describe("NATConfig controller", func() {
 			Expect(k8sClient.Delete(ctx, nc)).To(Succeed())
 
 			eventually(func() bool { return mockTargetCIDR.hasRemoved(targetCIDR) })
-			eventually(func() bool { return mockExtIPPool.hasRemoved(extCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasRemoved(extCIDR) })
 		})
 
 		It("does not remove a CIDR from BPF while another NATConfig still references it", func() {
@@ -74,7 +74,7 @@ var _ = Describe("NATConfig controller", func() {
 				metav1.LabelSelector{})
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
-			eventually(func() bool { return mockExtIPPool.hasAdded(oldExtCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasAdded(oldExtCIDR) })
 
 			Eventually(func() error {
 				var current v1alpha1.NATConfig
@@ -85,8 +85,8 @@ var _ = Describe("NATConfig controller", func() {
 				return k8sClient.Update(ctx, &current)
 			}, "5s", "100ms").Should(Succeed())
 
-			eventually(func() bool { return mockExtIPPool.hasAdded(newExtCIDR) })
-			eventually(func() bool { return mockExtIPPool.hasRemoved(oldExtCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasAdded(newExtCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasRemoved(oldExtCIDR) })
 		})
 	})
 
@@ -171,7 +171,7 @@ var _ = Describe("NATConfig controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
-			eventually(func() bool { return mockExtIPPool.hasAdded(extCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasAdded(extCIDR) })
 			consistently(func() bool { return !mockRouteAdvertiser.hasAdvertised(extCIDR) })
 		})
 
@@ -215,7 +215,7 @@ var _ = Describe("NATConfig controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
-			eventually(func() bool { return mockExtIPPool.hasAdded(extCIDR) })
+			eventually(func() bool { return mockExtIPKind.hasAdded(extCIDR) })
 			consistently(func() bool { return !mockRouteAdvertiser.hasAdvertised(extCIDR) })
 
 			var node corev1.Node

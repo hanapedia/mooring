@@ -39,6 +39,12 @@ const (
 	tcpSYN = 0x02
 	tcpRST = 0x04
 	tcpACK = 0x10
+
+	// dstKindExtIP / dstKindPodIP mirror the DST_KIND_EXT_IP / DST_KIND_POD_IP
+	// #defines in bpf/headers/revnat_maps.h (not generated as Go constants --
+	// bpf2go only generates bindings for BTF-visible types, not plain defines).
+	dstKindExtIP uint8 = 1
+	dstKindPodIP uint8 = 2
 )
 
 // beU32 packs an IPv4 address into the little-endian uint32 that
@@ -101,6 +107,40 @@ func (p *testPrograms) addTargetCIDR(ip net.IP) {
 	key := bpf.SnatEgressLpmKey{Prefixlen: 32, Addr: beU32(ip)}
 	val := bpf.SnatEgressTargetCidrVal{Addr: beU32(ip), Prefixlen: 32}
 	ExpectWithOffset(1, p.snat.TargetCidrs.Put(key, val)).To(Succeed(), "seed target_cidrs")
+}
+
+// addDstKindExtIP marks ip as DST_KIND_EXT_IP in dst_kind, as
+// maps.AddExtIPKind does for a real NATConfig's externalIPPool.
+func (p *testPrograms) addDstKindExtIP(ip net.IP) {
+	ExpectWithOffset(1, p.revnat.DstKind.Put(beU32(ip), dstKindExtIP)).To(Succeed(), "seed dst_kind (ext ip)")
+}
+
+// addDstKindPodIP marks ip as DST_KIND_POD_IP in dst_kind, as
+// maps.AddPodIPKind does for a local client pod.
+func (p *testPrograms) addDstKindPodIP(ip net.IP) {
+	ExpectWithOffset(1, p.revnat.DstKind.Put(beU32(ip), dstKindPodIP)).To(Succeed(), "seed dst_kind (pod ip)")
+}
+
+// portRangeInnerSpec matches the port_range_inner prototype in
+// bpf/headers/revnat_maps.h -- mirrors internal/maps.innerMapSpec, since
+// production code builds these the same way (see AddPortRange).
+var portRangeInnerSpec = &ebpf.MapSpec{
+	Type:       ebpf.Array,
+	KeySize:    4,
+	ValueSize:  4,
+	MaxEntries: 65536,
+}
+
+// addPortRangeLookup seeds one outer->inner->pod_ip entry in a
+// port_range_lookup_<proto> outer map, as maps.AddPortRange does for a real
+// NATPortRange allocation. The caller is responsible for picking the right
+// outer map for the protocol under test (e.g. p.revnat.PortRangeLookupTcp).
+func addPortRangeLookup(outer *ebpf.Map, extIP net.IP, port uint16, podIP net.IP) {
+	inner, err := ebpf.NewMap(portRangeInnerSpec)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "create port_range_inner")
+	defer inner.Close() // outer.Put below takes its own reference to the kernel map
+	ExpectWithOffset(1, inner.Put(uint32(port), beU32(podIP))).To(Succeed(), "seed port_range_inner")
+	ExpectWithOffset(1, outer.Put(beU32(extIP), inner)).To(Succeed(), "insert inner map into outer")
 }
 
 // addSinglePortNatConfig seeds one port_range_alloc covering exactly extPort

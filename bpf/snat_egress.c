@@ -276,23 +276,11 @@ int snat_egress(struct __sk_buff *skb) {
           .proto = IPPROTO_TCP,
           .kind = NAT_ENTRY_REVNAT,
       };
-      if (sv->closing_ns) {
-        // A second terminating segment confirms the close. Deliberately not
-        // just "tcp_ack" — a plain ACK also covers the common half-closed
-        // case (this side FIN'd, the other still sending data before its own
-        // FIN), and deleting on that would strand the still-open half onto a
-        // fresh, different port mid-flow.
-        if ((tcp_fin || tcp_rst) && tcp_ack) {
-          bpf_map_delete_elem(&nat_map, &revnat_key);
-          bpf_map_delete_elem(&nat_map, &snat_key);
-        }
-      } else if (tcp_fin || tcp_rst) {
-        __u64 now = bpf_ktime_get_ns();
-        struct nat_map_val *rv = bpf_map_lookup_elem(&nat_map, &revnat_key);
-        if (rv)
-          rv->closing_ns = now;
-        sv->closing_ns = now;
-      }
+      // own = this flow's snat entry (sv/snat_key, already in hand); peer =
+      // the paired revnat entry. See maps.h's track_tcp_close for why a
+      // second terminating segment (not just any ACK) is required to
+      // confirm the close.
+      track_tcp_close(&snat_key, sv, &revnat_key, tcp_fin, tcp_rst, tcp_ack);
     }
   } else {
     struct nat_config_key nc_key = {

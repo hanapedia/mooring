@@ -105,12 +105,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = daemon.NewNATConfigReconciler(mgr.GetClient(), nodeName, daemon.RealTargetCIDRMap{}, daemon.RealExtIPPoolMap{}, speaker).SetupWithManager(mgr); err != nil {
+	if err = daemon.NewNATConfigReconciler(mgr.GetClient(), nodeName, daemon.RealTargetCIDRMap{}, daemon.RealExtIPKindMap{}, speaker).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATConfig controller")
 		os.Exit(1)
 	}
 
-	if err := daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), nodeName, daemon.RealPortRangeLookupMap{}, daemon.RealNatConfigMap{}).SetupWithManager(mgr); err != nil {
+	if err := daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), nodeName, daemon.RealPortRangeLookupMap{}, daemon.RealNatConfigMap{}, daemon.RealPodIPKindMap{}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create NATPortRange sync controller")
 		os.Exit(1)
 	}
