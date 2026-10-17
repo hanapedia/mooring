@@ -15,3 +15,26 @@ CompileFlags:
   # header -- a real diagnostic there, but a false positive when clangd
   # treats this header as its own standalone translation unit.
   Add: [-include, bpf/headers/ctx/skb.h, -Wno-unused-function]
+---
+# bpf/headers/l4.h is likewise not self-contained: fixup_ip_change_csum is
+# written in terms of __ctx_buff/ctx_l3_csum_replace/ctx_l4_csum_replace_ip,
+# which only exist once ctx/skb.h or ctx/xdp.h is included first by whichever
+# .c/.h file pulls l4.h in -- same reasoning as revnat_core.h above.
+If:
+  PathMatch: bpf/headers/l4\.h
+CompileFlags:
+  Add: [-include, bpf/headers/ctx/skb.h]
+---
+# Every other header under bpf/headers/ (maps.h, ctx/skb.h, ctx/xdp.h, ...)
+# is a shared library of static __always_inline helpers: real callers always
+# live in a different .c/.h file (that's the point -- see e.g. maps.h's
+# nat_map_* functions or ctx/skb.h's ctx_* adapters), never in the header
+# itself. Opened on its own, clangd compiles the header as its own
+# translation unit and flags every one of those helpers as unused -- a false
+# positive specific to editing the header in isolation, not a real diagnostic
+# about the actual build (where each helper's caller is in the TU that
+# #includes it).
+If:
+  PathMatch: bpf/headers/.*\.h
+CompileFlags:
+  Add: [-Wno-unused-function]
