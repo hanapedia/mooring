@@ -1,11 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0
+#include "ctx/skb.h"
+#include "l4.h"
 #include "maps.h"
-#include "tc.h"
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
 char __license[] SEC("license") = "GPL";
+
+// Egress-direction L4 parse: resolves straight to pod_port/server_port (the
+// header's source-side field / icmp id vs. its dest-side field) and filters
+// out anything but ICMP_ECHO -- snat_egress only ever sees requests
+// travelling pod -> server. Mirrors revnat_core.h's parse_l4_hdr (ingress
+// direction: dest-side -> nat_port), see that file's copy for why the
+// ICMP-id/direction mapping isn't itself shared in l4.h. tcp_fin/rst/ack are
+// only meaningful when proto == IPPROTO_TCP. Returns 0 on a bounds-check
+// miss or the ICMP-type filter.
+static __always_inline int
+parse_l4_hdr_snat(void *data_end, struct iphdr *iph, __u32 l4_off, __u8 proto,
+                  __be16 *pod_port, __be16 *server_port, __u32 *csum_off,
+                  __u8 *tcp_fin, __u8 *tcp_rst, __u8 *tcp_ack) {
+  struct l4_raw raw = {};
+  if (!parse_l4_raw(data_end, iph, l4_off, proto, &raw))
+    return 0;
+
+  if (proto == IPPROTO_ICMP) {
+    if (raw.icmp_type != ICMP_ECHO)
+      return 0;
+    *pod_port = raw.icmp_id;
+    *server_port = 0;
+  } else {
+    *pod_port = raw.src_port;
+    *server_port = raw.dst_port;
+  }
+  *csum_off = raw.csum_off;
+  *tcp_fin = raw.tcp_fin;
+  *tcp_rst = raw.tcp_rst;
+  *tcp_ack = raw.tcp_ack;
+  return 1;
+}
 
 /// Map key and value types defs
 struct port_range_alloc {
@@ -70,10 +103,10 @@ struct {
 // Fixed-point projection of a 16-bit seed onto the closed interval
 // [start, end], used in place of a modulo (which needs a helper call for
 // entropy plus a divide by a non-constant divisor) to pick a starting port.
-// Same technique Cilium's bpf_nat.h uses for SNAT port selection.
+// Same technique Cilium's bpf_nat.h uses for SNAT port selection. n is
+// computed in 32 bits so the closed interval [0, 65535] doesn't wrap to 0.
 static __always_inline __u16 clamp_to_range(__u16 start, __u16 end, __u16 val) {
-  __u32 n = (__u32)(end - start) + 1; // closed interval; computed in 32 bits
-                                      // so [0, 65535] doesn't wrap to 0
+  __u32 n = (__u32)(end - start) + 1;
   __u32 m = (__u32)val * n;
   return start + (__u16)(m >> 16);
 }
@@ -109,30 +142,17 @@ static __always_inline int try_alloc_port(struct port_range_alloc *e,
 
   for (__u32 attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt++) {
     __be16 candidate = bpf_htons(port);
-    struct nat_map_key revnat_key = {
-        .ip_a = server_ip,
-        .ip_b = pod_ip,
-        .port_a = server_port,
-        .port_b = candidate,
-        .proto = proto,
-        .kind = NAT_ENTRY_REVNAT,
-    };
-    struct nat_map_val *existing = bpf_map_lookup_elem(&nat_map, &revnat_key);
+    struct nat_map_val *existing =
+        nat_map_lookup_revnat(server_ip, pod_ip, server_port, candidate, proto);
     if (!existing) {
       *out_port = candidate;
       return 1;
     }
     if (proto == IPPROTO_TCP && existing->closing_ns &&
         bpf_ktime_get_ns() - existing->closing_ns > NAT_CLOSING_STALE_NS) {
-      struct nat_map_key old_snat_key = {
-          .ip_a = pod_ip,
-          .ip_b = server_ip,
-          .port_a = existing->port, // the stale flow's pod_port
-          .port_b = server_port,
-          .proto = proto,
-          .kind = NAT_ENTRY_SNAT,
-      };
-      bpf_map_delete_elem(&nat_map, &old_snat_key);
+      // existing->port is the stale flow's pod_port
+      nat_map_delete_snat(pod_ip, server_ip, existing->port, server_port,
+                          proto);
       *out_port = candidate;
       return 1;
     }
@@ -148,6 +168,15 @@ static __always_inline int try_alloc_port(struct port_range_alloc *e,
 // which is what keeps this verifier-cheap regardless of how many allocations
 // a pod actually has — see the comment on MAX_ENTRY_ATTEMPTS for why an
 // exhaustive scan of every entry was rejected.
+//
+// idx is picked by the same clamp_to_range projection as try_alloc_port's
+// port selection, just onto [0, count-1] -- chosen over
+// "bpf_get_prandom_u32() % count" for the same reasons, and this multiply +
+// constant-shift shape additionally lets the verifier's own range tracking
+// prove idx < count directly, with no compiler-barrier workaround needed.
+// attempt is passed through to try_alloc_port as seed_offset so a
+// with-replacement resample of the same entry doesn't retry the exact same
+// (already-failed) port sequence.
 static __always_inline int
 allocate_snat_port(struct nat_config_val *cv, __be32 pod_ip, __be32 server_ip,
                    __be16 server_port, __be16 pod_port, __u8 proto,
@@ -157,17 +186,9 @@ allocate_snat_port(struct nat_config_val *cv, __be32 pod_ip, __be32 server_ip,
     count = MAX_PORT_RANGE_ALLOCS;
 
   for (__u32 attempt = 0; attempt < MAX_ENTRY_ATTEMPTS; attempt++) {
-    // Same fixed-point projection as clamp_to_range, just onto
-    // [0, count-1] instead of [port_start, port_end] (that's clamp_to_range
-    // with start=0). Chosen over "bpf_get_prandom_u32() % count" for the same
-    // reasons as port selection -- and unlike that modulo, this multiply +
-    // constant-shift shape lets the verifier's own range tracking prove
-    // idx < count directly, with no compiler-barrier workaround needed.
     __u16 seed = bpf_ntohs(pod_port) + (__u16)attempt;
     __u32 idx = clamp_to_range(0, (__u16)(count - 1), seed);
     struct port_range_alloc *e = &cv->port_range_allocs[idx];
-    // attempt as seed_offset: keeps a with-replacement resample of the same
-    // entry from retrying the exact same (already-failed) port sequence.
     if (try_alloc_port(e, pod_ip, server_ip, server_port, pod_port, attempt,
                        proto, out_port)) {
       *out_ext_ip = e->ext_ip;
@@ -177,88 +198,50 @@ allocate_snat_port(struct nat_config_val *cv, __be32 pod_ip, __be32 server_ip,
   return 0;
 }
 
-/// entrypoint for snat_egress
+// Looks up (or allocates) an ext_ip:nat_port for the current flow, rewrites
+// src IP/port to it, and fixes up checksums -- the pod->server mirror of
+// revnat_core's stage 2. iph->saddr/daddr are captured as pod_ip/server_ip
+// scalars up front, and the header/port rewrite happens before the csum
+// helpers below, for the same PTR_TO_PACKET-invalidation reason documented
+// on revnat_core.
 SEC("tcx/egress")
 int snat_egress(struct __sk_buff *skb) {
-  void *data = (void *)(long)skb->data;
-  void *data_end = (void *)(long)skb->data_end;
+  void *data = ctx_data(skb);
+  void *data_end = ctx_data_end(skb);
 
-  // parse ethernet header
   struct ethhdr *eth = data;
   if ((void *)(eth + 1) > data_end)
-    return TCX_NEXT;
+    return CTX_PASS;
 
   if (eth->h_proto != bpf_htons(ETH_P_IP))
-    return TCX_NEXT;
+    return CTX_PASS;
 
-  // parse IP header
   struct iphdr *iph = (void *)(eth + 1);
   if ((void *)(iph + 1) > data_end)
-    return TCX_NEXT;
+    return CTX_PASS;
 
-  // handle only tcp, udp, and icmp
-  if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP &&
-      iph->protocol != IPPROTO_ICMP)
-    return TCX_NEXT;
+  __u8 proto = iph->protocol;
+  if (proto != IPPROTO_TCP && proto != IPPROTO_UDP && proto != IPPROTO_ICMP)
+    return CTX_PASS;
 
-  // look up dest against target cidrs; value carries the matched CIDR identity
-  struct lpm_key lpm = {
-      .prefixlen = 32, /* match dest IP exactly */
-      .addr = iph->daddr,
-  };
-  struct target_cidr_val *tcv = bpf_map_lookup_elem(&target_cidrs, &lpm);
+  struct target_cidr_val *tcv = lookup_target_cidr(iph->daddr);
   if (!tcv)
-    return TCX_NEXT;
+    return CTX_PASS;
 
-  // look up snat config keyed by (pod_ip, matched_target_cidr) so that a pod
-  // matched by multiple NATConfigs uses the correct ext-IP pool per destination
   __be32 pod_ip = iph->saddr;
   __be32 server_ip = iph->daddr;
-  // parse l4 header
+
   __be16 pod_port, server_port;
   __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
   __u32 csum_off;
-  __u8 tcp_fin = 0, tcp_rst = 0, tcp_ack = 0;
+  __u8 tcp_fin, tcp_rst, tcp_ack;
 
-  if (iph->protocol == IPPROTO_TCP) {
-    struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
-    if ((void *)(tcph + 1) > data_end)
-      return TCX_NEXT;
-    pod_port = tcph->source;
-    server_port = tcph->dest;
-    csum_off = l4_off + offsetof(struct tcphdr, check);
-    tcp_fin = tcph->fin;
-    tcp_rst = tcph->rst;
-    tcp_ack = tcph->ack;
-  } else if (iph->protocol == IPPROTO_UDP) {
-    struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
-    if ((void *)(udph + 1) > data_end)
-      return TCX_NEXT;
-    pod_port = udph->source;
-    server_port = udph->dest;
-    csum_off = l4_off + offsetof(struct udphdr, check);
-  } else { // ICMP (use port as id)
-    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
-    if ((void *)(icmph + 1) > data_end)
-      return TCX_NEXT;
-    // handle only echo for now
-    if (icmph->type != ICMP_ECHO)
-      return TCX_NEXT;
-    pod_port = icmph->un.echo.id;
-    server_port = 0;
-    csum_off = l4_off + offsetof(struct icmphdr, checksum);
-  }
+  if (!parse_l4_hdr_snat(data_end, iph, l4_off, proto, &pod_port, &server_port,
+                         &csum_off, &tcp_fin, &tcp_rst, &tcp_ack))
+    return CTX_PASS;
 
-  // look up existing connection before allocating a new port
-  struct nat_map_key snat_key = {
-      .ip_a = pod_ip,
-      .ip_b = server_ip,
-      .port_a = pod_port,
-      .port_b = server_port,
-      .proto = iph->protocol,
-      .kind = NAT_ENTRY_SNAT,
-  };
-  struct nat_map_val *sv = bpf_map_lookup_elem(&nat_map, &snat_key);
+  struct nat_map_val *sv =
+      nat_map_lookup_snat(pod_ip, server_ip, pod_port, server_port, proto);
 
   __be32 ext_ip = 0;
   __be16 nat_port = 0;
@@ -267,91 +250,45 @@ int snat_egress(struct __sk_buff *skb) {
     ext_ip = sv->nat_ip;
     nat_port = sv->port;
 
-    if (iph->protocol == IPPROTO_TCP) {
-      struct nat_map_key revnat_key = {
-          .ip_a = server_ip,
-          .ip_b = pod_ip,
-          .port_a = server_port,
-          .port_b = sv->port,
-          .proto = IPPROTO_TCP,
-          .kind = NAT_ENTRY_REVNAT,
-      };
-      // own = this flow's snat entry (sv/snat_key, already in hand); peer =
-      // the paired revnat entry. See maps.h's track_tcp_close for why a
-      // second terminating segment (not just any ACK) is required to
-      // confirm the close.
-      track_tcp_close(&snat_key, sv, &revnat_key, tcp_fin, tcp_rst, tcp_ack);
-    }
+    if (proto == IPPROTO_TCP)
+      nat_map_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
+                              pod_port, sv, NAT_ENTRY_SNAT, tcp_fin, tcp_rst,
+                              tcp_ack);
   } else {
+    // new connection — the matched target CIDR picks which NATConfig's
+    // ext-IP pool to allocate from (a pod matching several NATConfigs gets
+    // independent pools per destination)
     struct nat_config_key nc_key = {
         .pod_ip = pod_ip,
         .cidr_addr = tcv->addr,
         .cidr_prefixlen = tcv->prefixlen,
     };
     struct nat_config_val *cv = bpf_map_lookup_elem(&nat_config, &nc_key);
-    if (!cv || cv->count == 0) // no snat config found
-      return TCX_NEXT;
+    if (!cv || cv->count == 0)
+      return CTX_PASS;
 
-    allocate_snat_port(cv, pod_ip, server_ip, server_port, pod_port,
-                       iph->protocol, &nat_port, &ext_ip);
-
+    allocate_snat_port(cv, pod_ip, server_ip, server_port, pod_port, proto,
+                       &nat_port, &ext_ip);
     if (!ext_ip)
-      return TCX_NEXT; // every allocation exhausted
+      return CTX_PASS; // every allocation exhausted
 
     __u64 closing_ns = 0;
-    if (iph->protocol == IPPROTO_TCP && (tcp_fin || tcp_rst))
+    if (proto == IPPROTO_TCP && (tcp_fin || tcp_rst))
       closing_ns = bpf_ktime_get_ns();
 
-    struct nat_map_val snat_val = {
-        .nat_ip = ext_ip, .port = nat_port, .closing_ns = closing_ns};
-    bpf_map_update_elem(&nat_map, &snat_key, &snat_val, BPF_ANY);
-
-    struct nat_map_key revnat_key = {
-        .ip_a = server_ip,
-        .ip_b = pod_ip,
-        .port_a = server_port,
-        .port_b = nat_port,
-        .proto = iph->protocol,
-        .kind = NAT_ENTRY_REVNAT,
-    };
-    struct nat_map_val revnat_val = {
-        .nat_ip = ext_ip, .port = pod_port, .closing_ns = closing_ns};
-    bpf_map_update_elem(&nat_map, &revnat_key, &revnat_val, BPF_ANY);
+    nat_map_update_snat(pod_ip, server_ip, pod_port, server_port, proto, ext_ip,
+                        nat_port, closing_ns);
+    nat_map_update_revnat(server_ip, pod_ip, server_port, nat_port, proto,
+                          ext_ip, pod_port, closing_ns);
   }
 
-  // rewrite headers before csum helpers: bpf_l3/l4_csum_replace call
-  // skb_make_writable internally, which can reallocate the skb and causes the
-  // verifier to invalidate all PTR_TO_PACKET registers. Do direct writes first.
   iph->saddr = ext_ip;
-  if (iph->protocol == IPPROTO_TCP) {
-    struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
-    if ((void *)(tcph + 1) > data_end)
-      return TCX_NEXT;
-    tcph->source = nat_port;
-  } else if (iph->protocol == IPPROTO_UDP) {
-    struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
-    if ((void *)(udph + 1) > data_end)
-      return TCX_NEXT;
-    udph->source = nat_port;
-  } else { // ICMP (uses port as id)
-    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
-    if ((void *)(icmph + 1) > data_end)
-      return TCX_NEXT;
-    icmph->un.echo.id = nat_port;
-  }
+  if (!write_l4_src_port(data_end, iph, proto, nat_port))
+    return CTX_PASS;
 
-  // fix checksums — from/to values are passed explicitly so the order relative
-  // to the header rewrites above does not affect correctness.
   __u32 ip_csum = sizeof(struct ethhdr) + offsetof(struct iphdr, check);
-  if (iph->protocol != IPPROTO_ICMP) {
-    bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
-    bpf_l4_csum_replace(skb, csum_off, pod_ip, ext_ip,
-                        BPF_F_PSEUDO_HDR | sizeof(__be32));
-    bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
-  } else {
-    bpf_l3_csum_replace(skb, ip_csum, pod_ip, ext_ip, sizeof(__be32));
-    bpf_l4_csum_replace(skb, csum_off, pod_port, nat_port, sizeof(__be16));
-  }
+  fixup_ip_change_csum(skb, proto, ip_csum, csum_off, pod_ip, ext_ip);
+  ctx_l4_csum_replace_port(skb, csum_off, pod_port, nat_port);
 
-  return TCX_NEXT;
+  return CTX_PASS;
 }
