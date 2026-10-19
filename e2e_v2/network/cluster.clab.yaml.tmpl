@@ -87,8 +87,14 @@ topology:
       - ip route replace default via 192.168.10.101 dev net0
   links:
     - endpoints: ["tor0:net1", "control-plane:node0"]
+      mtu: 1500
     - endpoints: ["tor0:net2", "worker:node0"]
+      mtu: 1500
     - endpoints: ["tor0:net3", "worker2:node0"]
+      mtu: 1500
     - endpoints: ["router0:net0", "tor0:net0"]
+      mtu: 1500
     - endpoints: ["router0:domestic0", "domestic0:net0"]
+      mtu: 1500
     - endpoints: ["router0:domestic1", "domestic1:net0"]
+      mtu: 1500
