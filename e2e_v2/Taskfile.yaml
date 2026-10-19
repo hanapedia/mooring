@@ -182,7 +182,7 @@ tasks:
         kubectl get pod -n default -l app=domestic1-client -o name | while read pod; do
           echo "=== $pod ==="
           kubectl exec -n default "${pod}" -- curl -s --max-time 10 -w "\n" 192.168.10.100:8000
-          kubectl exec -n default "${pod}" -- ping -c 3 192.168.10.100
+          kubectl exec -n default "${pod}" -- ping -c 3 192.168.0.100
         done
 
   apply-sample-resources:
