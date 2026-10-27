@@ -16,6 +16,9 @@ import (
 // xdpPass is XDP_PASS, as returned by Program.Run for the xdp revnat program.
 const xdpPass uint32 = 2
 
+// xdpDrop is XDP_DROP, as returned by Program.Run for a dropped packet.
+const xdpDrop uint32 = 1
+
 // testProgramsXDP mirrors testPrograms (bpftest_suite_test.go) but loads
 // revnat_xdp instead of revnat_ingress, to exercise the same stage1/stage2
 // logic through the XDP entry point (bpf/revnat_xdp.c, sharing
@@ -201,6 +204,22 @@ var _ = Describe("revnat_xdp", func() {
 			// depends on the test machine's routing table -- the only
 			// deterministic assertion is that it's not XDP_PASS.
 			Expect(ret).NotTo(Equal(xdpPass), "a stage1 nat_map miss must attempt the fib-based redirect, not fall through to a plain pass")
+		})
+	})
+
+	Context("bare TCP SYN (no ACK) on ingress", func() {
+		It("is dropped instead of being passed through to a pod", func() {
+			podIP := net.ParseIP("10.0.0.51")
+			serverIP := net.ParseIP("93.184.216.51")
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+
+			in := buildTCP(serverIP, podIP, 80, 40000, tcpSYN)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatXdp.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(xdpDrop), "a bare SYN is never a legitimate reply and must be dropped")
 		})
 	})
 })

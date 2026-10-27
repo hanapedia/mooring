@@ -153,7 +153,7 @@ var _ = Describe("revnat_ingress", func() {
 	})
 
 	Context("TCP connection close tracking", func() {
-		It("marks both entries closing on the first FIN+ACK, then reclaims them on the second", func() {
+		It("requires a FIN from each direction before reclaiming, not just a second terminating segment from one side", func() {
 			podIP := net.ParseIP("10.0.0.8")
 			serverIP := net.ParseIP("93.184.216.37")
 			extIP := net.ParseIP("203.0.113.12")
@@ -170,7 +170,7 @@ var _ = Describe("revnat_ingress", func() {
 			Expect(p.snat.NatMap.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
 				To(Succeed(), "seed revnat entry")
 
-			run := func(flags uint8) []byte {
+			runIngress := func(flags uint8) []byte {
 				in := buildTCP(serverIP, podIP, serverPort, natPort, flags)
 				out := make([]byte, len(in))
 				ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
@@ -179,7 +179,9 @@ var _ = Describe("revnat_ingress", func() {
 				return out
 			}
 
-			out := run(tcpFIN | tcpACK)
+			// First FIN from the server side marks only the revnat entry --
+			// closing_ns is never mirrored onto the peer (snat) entry.
+			out := runIngress(tcpFIN | tcpACK)
 			_, l4 := parseEthIPv4(out)
 			Expect(binary.BigEndian.Uint16(l4[2:4])).To(Equal(podPort), "dst port on the marking packet")
 
@@ -189,16 +191,91 @@ var _ = Describe("revnat_ingress", func() {
 
 			var snatVal bpf.SnatEgressNatMapVal
 			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
-			Expect(snatVal.ClosingNs).NotTo(BeZero(), "snat entry not marked closing after first FIN")
+			Expect(snatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
 
-			out = run(tcpFIN | tcpACK)
-			_, l4 = parseEthIPv4(out)
-			Expect(binary.BigEndian.Uint16(l4[2:4])).To(Equal(podPort), "dst port on the confirming/deleting packet")
+			// A second FIN from the SAME direction (e.g. a spoofed repeat,
+			// or a retransmit) must NOT delete anything -- only a FIN from
+			// the pod's own side can confirm the close. This is exactly
+			// what stops a one-directional off-path spoofer.
+			runIngress(tcpFIN | tcpACK)
 
 			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
-				NotTo(Succeed(), "revnat entry still present after confirmed close")
+				To(Succeed(), "revnat entry deleted by a second same-direction FIN -- should require both directions")
 			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
-				NotTo(Succeed(), "snat entry still present after confirmed close")
+				To(Succeed(), "snat entry deleted by a second same-direction FIN -- should require both directions")
+
+			// Now the pod's own side sends a FIN too, via snat_egress
+			// reusing the already-seeded snat entry. A FIN observed from
+			// both directions confirms a clean close, so both entries are
+			// deleted immediately.
+			podFIN := buildTCP(podIP, serverIP, podPort, serverPort, tcpFIN|tcpACK)
+			_, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: podFIN, DataOut: make([]byte, len(podFIN))})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
+				NotTo(Succeed(), "revnat entry still present after a FIN from both directions")
+			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
+				NotTo(Succeed(), "snat entry still present after a FIN from both directions")
+		})
+
+		It("clears the closing mark as soon as the same (marked) side sends ordinary traffic again", func() {
+			podIP := net.ParseIP("10.0.0.9")
+			serverIP := net.ParseIP("93.184.216.38")
+			extIP := net.ParseIP("203.0.113.13")
+			const podPort, serverPort, natPort uint16 = 53424, 80, 40004
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+
+			snatKey := natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT)
+			revnatKey := natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT)
+
+			Expect(p.snat.NatMap.Put(snatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(natPort)})).
+				To(Succeed(), "seed snat entry")
+			Expect(p.snat.NatMap.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
+				To(Succeed(), "seed revnat entry")
+
+			// A spoofed RST from the server side marks the revnat entry
+			// closing. The paired snat entry is untouched -- closing_ns is
+			// never mirrored onto the peer, only ever set from genuine
+			// traffic in that entry's own direction.
+			rst := buildTCP(serverIP, podIP, serverPort, natPort, tcpRST)
+			_, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: rst, DataOut: make([]byte, len(rst))})
+			Expect(err).NotTo(HaveOccurred())
+
+			var revnatVal bpf.SnatEgressNatMapVal
+			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed())
+			Expect(revnatVal.ClosingNs).NotTo(BeZero(), "entry not marked closing after RST")
+
+			var snatVal bpf.SnatEgressNatMapVal
+			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed())
+			Expect(snatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
+
+			// Ordinary (non-FIN/RST) traffic from the SAME (server) side --
+			// the one that sent the RST -- is enough to clear its own mark,
+			// with no need for the pod side to do anything at all.
+			serverData := buildTCP(serverIP, podIP, serverPort, natPort, tcpACK)
+			_, err = p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: serverData, DataOut: make([]byte, len(serverData))})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed())
+			Expect(revnatVal.ClosingNs).To(BeZero(), "closing mark should clear once the marked side resumes ordinary traffic")
+		})
+	})
+
+	Context("bare TCP SYN (no ACK) on ingress", func() {
+		It("is dropped instead of being passed through to a pod", func() {
+			podIP := net.ParseIP("10.0.0.51")
+			serverIP := net.ParseIP("93.184.216.51")
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+
+			in := buildTCP(serverIP, podIP, 80, 40000, tcpSYN)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcDrop), "a bare SYN is never a legitimate reply and must be dropped")
 		})
 	})
 })

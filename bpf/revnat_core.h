@@ -20,13 +20,13 @@
 // (the header's dest-side field / icmp id vs. its source-side field) and
 // filters out anything but ICMP_ECHOREPLY -- revnat_core only ever sees
 // replies travelling server -> pod, so a request reaching this path was
-// never a tracked flow. tcp_fin/rst/ack are only meaningful when proto ==
+// never a tracked flow. tcp_syn/fin/rst/ack are only meaningful when proto ==
 // IPPROTO_TCP (left zeroed otherwise, same as the inline code this
 // replaces). Returns 0 on a bounds-check miss or the ICMP-type filter.
 static __always_inline int
 parse_l4_hdr(void *data_end, struct iphdr *iph, __u32 l4_off, __u8 proto,
             __be16 *nat_port, __be16 *server_port, __u32 *csum_off,
-            __u8 *tcp_fin, __u8 *tcp_rst, __u8 *tcp_ack) {
+            __u8 *tcp_syn, __u8 *tcp_fin, __u8 *tcp_rst, __u8 *tcp_ack) {
   struct l4_raw raw = {};
   if (!parse_l4_raw(data_end, iph, l4_off, proto, &raw))
     return 0;
@@ -41,6 +41,7 @@ parse_l4_hdr(void *data_end, struct iphdr *iph, __u32 l4_off, __u8 proto,
     *server_port = raw.src_port;
   }
   *csum_off = raw.csum_off;
+  *tcp_syn = raw.tcp_syn;
   *tcp_fin = raw.tcp_fin;
   *tcp_rst = raw.tcp_rst;
   *tcp_ack = raw.tcp_ack;
@@ -120,11 +121,10 @@ static __always_inline int
 do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
               __be16 server_port, __be16 nat_port, __be16 pod_port,
               __u32 csum_off, __u8 proto, struct nat_map_val *nv,
-              __u8 tcp_fin, __u8 tcp_rst, __u8 tcp_ack) {
+              __u8 tcp_fin, __u8 tcp_rst) {
   if (proto == IPPROTO_TCP)
     nat_map_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
-                           pod_port, nv, NAT_ENTRY_REVNAT, tcp_fin, tcp_rst,
-                           tcp_ack);
+                           pod_port, nv, NAT_ENTRY_REVNAT, tcp_fin, tcp_rst);
 
   void *data = ctx_data(ctx);
   void *data_end = ctx_data_end(ctx);
@@ -166,6 +166,12 @@ do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
  *           authority in both branches below; this just keeps unauthenticated
  *           noise from reaching that far.
  * - no   -> CTX_PASS
+ * - a TCP SYN without ACK is dropped unconditionally here, before the
+ *   EXT_IP/POD_IP branch: mooring is egress-only, so a legitimate ingress
+ *   packet is always a reply, and a reply never starts with a bare SYN
+ *   (barring simultaneous open, ignored). This also keeps such a packet
+ *   from ever reaching a pod and provoking a reply that would seed a bogus
+ *   nat_map entry on egress (see snat_egress.c's matching check).
  * - EXT_IP -> stage 1: resolve pod_ip from the port, rewrite dst, then look
  *             up the nat_map revnat entry (lookup_revnat_entry): found ->
  *             stage 2 (do_port_revnat); not found -> the pod lives on
@@ -175,7 +181,7 @@ do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
  *             as a hit (which already rewrote the packet in place); never
  *             redirect
  *
- * server_ip/daddr/proto/tcp_fin/tcp_rst/tcp_ack below are all captured as
+ * server_ip/daddr/proto/tcp_syn/tcp_fin/tcp_rst/tcp_ack below are all captured as
  * plain scalars rather than re-read from iph later, since bpf_l3/l4_csum_
  * replace (on the skb/TC side) call skb_make_writable internally, which can
  * invalidate PTR_TO_PACKET registers including iph itself.
@@ -213,11 +219,14 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
   __be16 nat_port, server_port;
   __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
   __u32 csum_off;
-  __u8 tcp_fin, tcp_rst, tcp_ack;
+  __u8 tcp_syn, tcp_fin, tcp_rst, tcp_ack;
 
   if (!parse_l4_hdr(data_end, iph, l4_off, proto, &nat_port, &server_port,
-                    &csum_off, &tcp_fin, &tcp_rst, &tcp_ack))
+                    &csum_off, &tcp_syn, &tcp_fin, &tcp_rst, &tcp_ack))
     return CTX_PASS;
+
+  if (proto == IPPROTO_TCP && tcp_syn && !tcp_ack)
+    return CTX_DROP;
 
   if (kind == DST_KIND_POD_IP) {
     struct nat_map_val *nv = lookup_revnat_entry(ctx, nat_port, server_port);
@@ -225,8 +234,7 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
       return CTX_PASS;
     __be16 pod_port = nv->port;
     return do_port_revnat(ctx, server_ip, daddr, server_port, nat_port,
-                          pod_port, csum_off, proto, nv, tcp_fin, tcp_rst,
-                          tcp_ack);
+                          pod_port, csum_off, proto, nv, tcp_fin, tcp_rst);
   }
 
   // DST_KIND_EXT_IP: stage 1 -- resolve pod_ip from the per-protocol port
@@ -251,6 +259,5 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
     return ctx_redirect_transit(ctx);
   __be16 pod_port = nv->port;
   return do_port_revnat(ctx, server_ip, pod_ip, server_port, nat_port,
-                        pod_port, csum_off, proto, nv, tcp_fin, tcp_rst,
-                        tcp_ack);
+                        pod_port, csum_off, proto, nv, tcp_fin, tcp_rst);
 }

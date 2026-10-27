@@ -153,7 +153,7 @@ var _ = Describe("snat_egress", func() {
 	})
 
 	Context("TCP connection close tracking", func() {
-		It("marks both entries closing on the first FIN+ACK, then reclaims them on the second", func() {
+		It("requires a FIN from each direction before reclaiming, not just a second terminating segment from one side", func() {
 			podIP := net.ParseIP("10.0.0.5")
 			serverIP := net.ParseIP("93.184.216.34")
 			extIP := net.ParseIP("203.0.113.9")
@@ -161,8 +161,9 @@ var _ = Describe("snat_egress", func() {
 
 			p.addTargetCIDR(serverIP)
 			p.addSinglePortNatConfig(podIP, serverIP, 32, extIP, extPort)
+			p.addDstKindPodIP(podIP) // needed for the confirming FIN via revnat_ingress below
 
-			run := func(flags uint8) {
+			runEgress := func(flags uint8) {
 				pkt := buildTCP(podIP, serverIP, podPort, serverPort, flags)
 				_, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: pkt, DataOut: make([]byte, len(pkt))})
 				Expect(err).NotTo(HaveOccurred())
@@ -171,8 +172,11 @@ var _ = Describe("snat_egress", func() {
 			snatKey := natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT)
 			revnatKey := natMapKey(serverIP, podIP, serverPort, extPort, protoTCP, natEntryREVNAT)
 
-			run(tcpSYN)
-			run(tcpFIN | tcpACK)
+			runEgress(tcpSYN)
+
+			// First FIN, from the pod's own side, marks only the snat entry
+			// -- closing_ns is never mirrored onto the peer (revnat) entry.
+			runEgress(tcpFIN | tcpACK)
 
 			var snatVal bpf.SnatEgressNatMapVal
 			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
@@ -180,14 +184,55 @@ var _ = Describe("snat_egress", func() {
 
 			var revnatVal bpf.SnatEgressNatMapVal
 			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed(), "revnat entry missing after first FIN")
-			Expect(revnatVal.ClosingNs).NotTo(BeZero(), "revnat entry not marked closing after first FIN")
+			Expect(revnatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
 
-			run(tcpFIN | tcpACK)
+			// A second FIN from the SAME (pod) side must NOT delete
+			// anything -- only a FIN from the server's own side can confirm
+			// the close.
+			runEgress(tcpFIN | tcpACK)
 
 			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
-				NotTo(Succeed(), "snat entry still present after confirmed close")
+				To(Succeed(), "snat entry deleted by a second same-direction FIN -- should require both directions")
 			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
-				NotTo(Succeed(), "revnat entry still present after confirmed close")
+				To(Succeed(), "revnat entry deleted by a second same-direction FIN -- should require both directions")
+
+			// Now the server side sends a FIN too, via revnat_ingress
+			// reusing the already-allocated revnat entry. A FIN observed
+			// from both directions confirms a clean close.
+			serverFIN := buildTCP(serverIP, podIP, serverPort, extPort, tcpFIN|tcpACK)
+			_, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: serverFIN, DataOut: make([]byte, len(serverFIN))})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
+				NotTo(Succeed(), "snat entry still present after a FIN from both directions")
+			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
+				NotTo(Succeed(), "revnat entry still present after a FIN from both directions")
+		})
+	})
+
+	Context("TCP packet with no existing state that is not the pod's own pure SYN", func() {
+		It("is dropped instead of allocating a mapping or leaking the pod IP", func() {
+			podIP := net.ParseIP("10.0.0.6")
+			serverIP := net.ParseIP("93.184.216.39")
+			extIP := net.ParseIP("203.0.113.14")
+			const podPort, serverPort, extPort uint16 = 53999, 80, 41000
+
+			p.addTargetCIDR(serverIP)
+			p.addSinglePortNatConfig(podIP, serverIP, 32, extIP, extPort)
+
+			// No snat entry exists yet for this flow, and this is a bare
+			// RST|ACK -- the shape of a pod's own kernel replying to an
+			// unsolicited inbound packet, not the pod's own connection
+			// attempt.
+			in := buildTCP(podIP, serverIP, podPort, serverPort, tcpRST|tcpACK)
+			out := make([]byte, len(in))
+			ret, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcDrop))
+			Expect(out).To(Equal(in), "a dropped packet must not be rewritten (no pod-IP leak)")
+
+			Expect(p.snat.NatMap.Lookup(natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT), &bpf.SnatEgressNatMapVal{})).
+				NotTo(Succeed(), "no snat entry should have been allocated for an unsolicited reply")
 		})
 	})
 })
