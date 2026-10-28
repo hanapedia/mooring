@@ -13,13 +13,13 @@ char __license[] SEC("license") = "GPL";
 // out anything but ICMP_ECHO -- snat_egress only ever sees requests
 // travelling pod -> server. Mirrors revnat_core.h's parse_l4_hdr (ingress
 // direction: dest-side -> nat_port), see that file's copy for why the
-// ICMP-id/direction mapping isn't itself shared in l4.h. tcp_fin/rst/ack are
-// only meaningful when proto == IPPROTO_TCP. Returns 0 on a bounds-check
+// ICMP-id/direction mapping isn't itself shared in l4.h. tcp_syn/fin/rst/ack
+// are only meaningful when proto == IPPROTO_TCP. Returns 0 on a bounds-check
 // miss or the ICMP-type filter.
 static __always_inline int
 parse_l4_hdr_snat(void *data_end, struct iphdr *iph, __u32 l4_off, __u8 proto,
                   __be16 *pod_port, __be16 *server_port, __u32 *csum_off,
-                  __u8 *tcp_fin, __u8 *tcp_rst, __u8 *tcp_ack) {
+                  __u8 *tcp_syn, __u8 *tcp_fin, __u8 *tcp_rst, __u8 *tcp_ack) {
   struct l4_raw raw = {};
   if (!parse_l4_raw(data_end, iph, l4_off, proto, &raw))
     return 0;
@@ -34,6 +34,7 @@ parse_l4_hdr_snat(void *data_end, struct iphdr *iph, __u32 l4_off, __u8 proto,
     *server_port = raw.dst_port;
   }
   *csum_off = raw.csum_off;
+  *tcp_syn = raw.tcp_syn;
   *tcp_fin = raw.tcp_fin;
   *tcp_rst = raw.tcp_rst;
   *tcp_ack = raw.tcp_ack;
@@ -84,11 +85,10 @@ struct nat_config_key {
 // exists in an entry that was never sampled.
 #define MAX_ENTRY_ATTEMPTS 8
 
-// How long an entry must have been marked "closing" (FIN/RST seen, no
-// confirming second FIN/RST yet) before it is eligible to be reclaimed by a
-// colliding allocation. Covers unclean ends (crash, dropped FIN/RST) that the
-// active connection-tracking below never gets to confirm. TCP only — UDP/ICMP
-// entries never set closing_ns, so they are never reclaimed this way.
+// How long an entry marked closing (see nat_map_val's closing_ns comment in
+// maps.h) can sit unconfirmed before a colliding allocation may reclaim it.
+// Covers unclean ends (crash, dropped FIN/RST) that close-tracking never
+// gets to confirm. TCP only — UDP/ICMP never set closing_ns.
 #define NAT_CLOSING_STALE_NS (10ULL * 1000000000ULL)
 
 /// Map defs
@@ -234,10 +234,10 @@ int snat_egress(struct __sk_buff *skb) {
   __be16 pod_port, server_port;
   __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
   __u32 csum_off;
-  __u8 tcp_fin, tcp_rst, tcp_ack;
+  __u8 tcp_syn, tcp_fin, tcp_rst, tcp_ack;
 
   if (!parse_l4_hdr_snat(data_end, iph, l4_off, proto, &pod_port, &server_port,
-                         &csum_off, &tcp_fin, &tcp_rst, &tcp_ack))
+                         &csum_off, &tcp_syn, &tcp_fin, &tcp_rst, &tcp_ack))
     return CTX_PASS;
 
   struct nat_map_val *sv =
@@ -252,12 +252,19 @@ int snat_egress(struct __sk_buff *skb) {
 
     if (proto == IPPROTO_TCP)
       nat_map_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
-                              pod_port, sv, NAT_ENTRY_SNAT, tcp_fin, tcp_rst,
-                              tcp_ack);
+                              pod_port, sv, NAT_ENTRY_SNAT, tcp_fin, tcp_rst);
   } else {
-    // new connection — the matched target CIDR picks which NATConfig's
-    // ext-IP pool to allocate from (a pod matching several NATConfigs gets
-    // independent pools per destination)
+    // A TCP flow with no existing snat entry must be the pod's own pure
+    // SYN -- anything else wasn't initiated by this pod (most likely its
+    // kernel replying to an unsolicited packet let in by revnat_core's
+    // redirect-on-miss). Drop rather than allocate or pass un-NATed, so it
+    // can't seed a bogus entry or leak the pod's real IP via iph->saddr.
+    if (proto == IPPROTO_TCP && !(tcp_syn && !tcp_ack))
+      return CTX_DROP;
+
+    // the matched target CIDR picks which NATConfig's ext-IP pool to
+    // allocate from (a pod matching several NATConfigs gets independent
+    // pools per destination)
     struct nat_config_key nc_key = {
         .pod_ip = pod_ip,
         .cidr_addr = tcv->addr,

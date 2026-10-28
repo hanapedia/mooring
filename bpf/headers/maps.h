@@ -46,12 +46,16 @@ struct nat_map_key {
 struct nat_map_val {
   __be32 nat_ip;
   __be16 port; // nat_port for a snat entry, pod_port for a revnat entry
-  // 0 = not closing. Else bpf_ktime_get_ns() at the moment a FIN or RST was
-  // first observed for this (TCP-only) flow. ktime is monotonic-since-boot, so
-  // 0 is never a real timestamp once packets are flowing -- safe as a
-  // sentinel. UDP/ICMP entries never set this, which is what makes them
-  // permanently ineligible for the stale-reclaim check in the allocator (no
-  // marker, no override).
+  // 0 = not closing. Else bpf_ktime_get_ns() at the moment THIS entry's own
+  // direction (pod-side for a snat entry, server-side for a revnat entry)
+  // most recently showed a FIN or RST with no resumed ordinary traffic
+  // since. Set only from genuine traffic actually seen in this entry's own
+  // direction -- never mirrored from the peer entry -- so a one-directional
+  // off-path spoofer can only ever set this on the entry facing them, never
+  // the other side's; see nat_map_track_tcp_close for why that's what makes
+  // deletion safe. Also doubles as the staleness timestamp for the
+  // allocator's reclaim check (snat_egress.c's try_alloc_port). UDP/ICMP
+  // never set this, so they're never reclaimed that way.
   __u64 closing_ns;
 };
 
@@ -170,39 +174,40 @@ static __always_inline long nat_map_delete_revnat(__be32 server_ip,
 }
 
 // Shared TCP close state machine for nat_map -- used by do_port_revnat
-// (revnat_core.h, server->pod direction, own_kind = NAT_ENTRY_REVNAT, own =
-// the revnat entry nv) and by snat_egress.c (pod->server direction,
-// own_kind = NAT_ENTRY_SNAT, own = the snat entry sv). server_ip, pod_ip,
-// server_port, nat_port and pod_port together fully determine *both* the
-// revnat key (server_ip, pod_ip, server_port, nat_port) and the snat key
-// (pod_ip, server_ip, pod_port, server_port) regardless of which one the
-// caller already holds -- so both callers pass the same five scalars, and
-// own_kind is just which entry that is (to know which lookup finds the
-// peer; the delete path drops both unconditionally either way).
+// (revnat_core.h, own_kind = NAT_ENTRY_REVNAT, own = the revnat entry nv)
+// and by snat_egress.c (own_kind = NAT_ENTRY_SNAT, own = the snat entry sv).
+// server_ip, pod_ip, server_port, nat_port and pod_port together determine
+// both the revnat and snat keys regardless of which one the caller holds,
+// so both callers pass the same five scalars; own_kind just says which one
+// own is, to find the peer when needed.
 //
-// The first FIN or RST (either direction) stamps closing_ns on both
-// entries. A second FIN or RST, combined with ACK, confirms the close and
-// deletes both -- requiring a second terminating segment (not just any
-// ACK) specifically avoids tearing down a half-closed connection (one side
-// FIN'd, the other still sending data) onto a fresh port mid-flow. If the
-// close is never confirmed (crash, dropped FIN/RST), the entries are left
-// in place but become eligible for reclamation -- see snat_egress.c's
-// try_alloc_port for that stale-entry path.
-//
-// own (nv/sv) is taken as a plain pointer -- the caller already has it from
-// its own nat_map_lookup_revnat/nat_map_lookup_snat call, and writing
-// through it (own->closing_ns = ...) mutates that entry directly in the map
-// (bpf_map_lookup_elem on a hash-type map returns a pointer into the map's
-// own backing memory, not a copy -- no bpf_map_update_elem needed, same for
-// peer below). Only TCP ever calls this, so proto is always IPPROTO_TCP
-// rather than a parameter.
+// See nat_map_val's closing_ns comment above for why deletion (own and peer
+// both showing their own FIN/RST) can't be forced by a one-directional
+// spoofer. own/peer are plain pointers into the map's own backing memory,
+// so writing through them needs no bpf_map_update_elem. Only TCP calls
+// this, so proto is always IPPROTO_TCP.
 static __always_inline void
 nat_map_track_tcp_close(__be32 server_ip, __be32 pod_ip, __be16 server_port,
                         __be16 nat_port, __be16 pod_port,
                         struct nat_map_val *own, __u8 own_kind, __u8 fin,
-                        __u8 rst, __u8 ack) {
-  if (own->closing_ns) {
-    if ((fin || rst) && ack) {
+                        __u8 rst) {
+  if (!own->closing_ns && !fin && !rst)
+    return; // healthy flow, nothing to record
+
+  if (fin || rst) {
+    if (own->closing_ns)
+      return; // already marked from this side; the other side's own
+              // traffic would already have deleted both if it mattered
+
+    own->closing_ns = bpf_ktime_get_ns();
+
+    struct nat_map_val *peer =
+        (own_kind == NAT_ENTRY_REVNAT)
+            ? nat_map_lookup_snat(pod_ip, server_ip, pod_port, server_port,
+                                  IPPROTO_TCP)
+            : nat_map_lookup_revnat(server_ip, pod_ip, server_port, nat_port,
+                                    IPPROTO_TCP);
+    if (peer && peer->closing_ns) {
       nat_map_delete_revnat(server_ip, pod_ip, server_port, nat_port,
                             IPPROTO_TCP);
       nat_map_delete_snat(pod_ip, server_ip, pod_port, server_port,
@@ -210,18 +215,9 @@ nat_map_track_tcp_close(__be32 server_ip, __be32 pod_ip, __be16 server_port,
     }
     return;
   }
-  if (!fin && !rst)
-    return;
-  __u64 now = bpf_ktime_get_ns();
-  own->closing_ns = now;
-  struct nat_map_val *peer =
-      (own_kind == NAT_ENTRY_REVNAT)
-          ? nat_map_lookup_snat(pod_ip, server_ip, pod_port, server_port,
-                                IPPROTO_TCP)
-          : nat_map_lookup_revnat(server_ip, pod_ip, server_port, nat_port,
-                                  IPPROTO_TCP);
-  if (peer)
-    peer->closing_ns = now;
+
+  own->closing_ns =
+      0; // this side resumed ordinary traffic; its own mark was premature
 }
 
 // Value stored in target_cidrs: the canonical network address and prefix length

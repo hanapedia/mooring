@@ -29,7 +29,7 @@ struct l4_raw {
   __be16 icmp_id;   // icmph->un.echo.id, else 0
   __u8 icmp_type;   // icmph->type -- only meaningful if proto == IPPROTO_ICMP
   __u32 csum_off;   // byte offset of the L4 checksum field
-  __u8 tcp_fin, tcp_rst, tcp_ack; // only meaningful if proto == IPPROTO_TCP
+  __u8 tcp_syn, tcp_fin, tcp_rst, tcp_ack; // only meaningful if proto == IPPROTO_TCP
 };
 
 // l4_off is the byte offset of the L4 header from the start of the packet
@@ -47,6 +47,7 @@ static __always_inline int parse_l4_raw(void *data_end, struct iphdr *iph,
     out->src_port = tcph->source;
     out->dst_port = tcph->dest;
     out->csum_off = l4_off + offsetof(struct tcphdr, check);
+    out->tcp_syn = tcph->syn;
     out->tcp_fin = tcph->fin;
     out->tcp_rst = tcph->rst;
     out->tcp_ack = tcph->ack;

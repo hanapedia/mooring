@@ -34,6 +34,7 @@ const (
 	protoICMP uint8 = 1
 
 	tcxNext uint32 = 0xffffffff // TCX_NEXT (-1), as returned by Program.Run
+	tcDrop  uint32 = 2          // TC_ACT_SHOT, as returned by Program.Run for a dropped tcx packet
 
 	tcpFIN = 0x01
 	tcpSYN = 0x02
