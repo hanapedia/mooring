@@ -122,6 +122,16 @@ func (p *testPrograms) addDstKindPodIP(ip net.IP) {
 	ExpectWithOffset(1, p.revnat.DstKind.Put(beU32(ip), dstKindPodIP)).To(Succeed(), "seed dst_kind (pod ip)")
 }
 
+// addPodNatPorts marks every port in [portStart, portEnd] as belonging to
+// podIP's own NAT block in pod_nat_ports, as maps.AddPodNatPorts does for a
+// real NATPortRange allocation.
+func (p *testPrograms) addPodNatPorts(podIP net.IP, portStart, portEnd uint16) {
+	for port := portStart; port <= portEnd; port++ {
+		key := bpf.RevnatIngressPodPortKey{PodIp: beU32(podIP), Port: port}
+		ExpectWithOffset(1, p.revnat.PodNatPorts.Put(key, uint8(1))).To(Succeed(), "seed pod_nat_ports")
+	}
+}
+
 // portRangeInnerSpec matches the port_range_inner prototype in
 // bpf/headers/revnat_maps.h -- mirrors internal/maps.innerMapSpec, since
 // production code builds these the same way (see AddPortRange).

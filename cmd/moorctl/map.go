@@ -127,7 +127,7 @@ func runPortRangeAdd(_ *cobra.Command, _ []string) error {
 			return err
 		}
 	}
-	return nil
+	return maps.AddPodNatPorts(podIP, prPortStart, prPortEnd)
 }
 
 func parseProto(s string) (uint8, error) {

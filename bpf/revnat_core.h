@@ -64,6 +64,13 @@ static __always_inline void *lookup_port_range_map(__u8 proto,
   }
 }
 
+// Is port (host byte order) inside pod_ip's own allocated NAT block(s)? See
+// pod_nat_ports in revnat_maps.h.
+static __always_inline int pod_owns_nat_port(__be32 pod_ip, __u16 port) {
+  struct pod_port_key key = {.pod_ip = pod_ip, .port = port};
+  return bpf_map_lookup_elem(&pod_nat_ports, &key) != NULL;
+}
+
 // Looks up the nat_map revnat entry for the (server_ip, pod_ip, server_port,
 // nat_port, proto) tuple implied by the current packet -- dst must already
 // be pod_ip by the time this is called (stage 1, if any, has already run
@@ -176,10 +183,15 @@ do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
  *             up the nat_map revnat entry (lookup_revnat_entry): found ->
  *             stage 2 (do_port_revnat); not found -> the pod lives on
  *             another node -> forward it (ctx_redirect_transit)
- * - POD_IP -> same lookup, but a miss doesn't change the outcome here --
- *             this was never a tracked NAT flow, so just CTX_PASS the same
- *             as a hit (which already rewrote the packet in place); never
- *             redirect
+ * - POD_IP -> same lookup, but a miss here is dropped, not passed, when the
+ *             port also falls inside this pod's own NAT block
+ *             (pod_owns_nat_port): entries for this dst are local-node-only
+ *             and written synchronously on the pod's own egress, so a miss
+ *             can't be a late-arriving real reply for a port mooring
+ *             itself manages. A miss on a port outside the block was never
+ *             mooring's concern (e.g. a load balancer's direct delivery to
+ *             the pod's real listening port) and passes through
+ *             unchanged; never redirect either way
  *
  * server_ip/daddr/proto/tcp_syn/tcp_fin/tcp_rst/tcp_ack below are all captured as
  * plain scalars rather than re-read from iph later, since bpf_l3/l4_csum_
@@ -229,9 +241,24 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
     return CTX_DROP;
 
   if (kind == DST_KIND_POD_IP) {
+    // A port outside this pod's own NAT block was never mooring's port to
+    // begin with -- e.g. a load balancer's direct delivery to the pod's
+    // real listening port -- so skip straight to CTX_PASS without even
+    // consulting nat_map; checking the cheaper, pod-scoped map first saves
+    // a nat_map lookup for all such traffic, which is never mooring's
+    // concern regardless of what nat_map would have said.
+    if (!pod_owns_nat_port(daddr, bpf_ntohs(nat_port)))
+      return CTX_PASS;
+    // In-block: unlike the EXT_IP branch below, a miss here is conclusive,
+    // not probabilistic. dst_kind's POD_IP entries are only ever written on
+    // the pod's own home node, and snat_egress writes this pod's nat_map
+    // entries synchronously, before its own egress packet even leaves the
+    // host -- so no real reply could possibly be missing from the table
+    // for a port mooring itself manages. That's exactly the scanning
+    // vector this closes.
     struct nat_map_val *nv = lookup_revnat_entry(ctx, nat_port, server_port);
     if (!nv)
-      return CTX_PASS;
+      return CTX_DROP;
     __be16 pod_port = nv->port;
     return do_port_revnat(ctx, server_ip, daddr, server_port, nat_port,
                           pod_port, csum_off, proto, nv, tcp_fin, tcp_rst);

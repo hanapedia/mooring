@@ -68,6 +68,15 @@ func (p *testProgramsXDP) addDstKindPodIP(ip net.IP) {
 	ExpectWithOffset(1, p.revnat.DstKind.Put(beU32(ip), dstKindPodIP)).To(Succeed(), "seed dst_kind (pod ip)")
 }
 
+// addPodNatPorts mirrors testPrograms' helper of the same name
+// (bpftest_suite_test.go), for the XDP entry point.
+func (p *testProgramsXDP) addPodNatPorts(podIP net.IP, portStart, portEnd uint16) {
+	for port := portStart; port <= portEnd; port++ {
+		key := bpf.RevnatXdpPodPortKey{PodIp: beU32(podIP), Port: port}
+		ExpectWithOffset(1, p.revnat.PodNatPorts.Put(key, uint8(1))).To(Succeed(), "seed pod_nat_ports")
+	}
+}
+
 var _ = Describe("revnat_xdp", func() {
 	var p *testProgramsXDP
 
@@ -88,6 +97,7 @@ var _ = Describe("revnat_xdp", func() {
 
 			p.addTargetCIDR(serverIP)
 			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, natPort, natPort)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
 			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
@@ -138,20 +148,40 @@ var _ = Describe("revnat_xdp", func() {
 		})
 	})
 
-	Context("dst_kind is POD_IP but nat_map misses", func() {
-		It("passes the packet through unmodified, not redirected", func() {
+	Context("dst_kind is POD_IP but nat_map misses, dst port inside the pod's own NAT block", func() {
+		It("drops the packet instead of passing it through to the pod", func() {
 			podIP := net.ParseIP("10.0.0.5")
 			serverIP := net.ParseIP("93.184.216.34")
+			const natPort uint16 = 40000
 
 			p.addTargetCIDR(serverIP)
 			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, 40000, 40099)
 
-			in := buildTCP(serverIP, podIP, 80, 40000, tcpACK)
+			in := buildTCP(serverIP, podIP, 80, natPort, tcpACK)
 			out := make([]byte, len(in))
 			ret, err := p.revnat.RevnatXdp.Run(&ebpf.RunOptions{Data: in, DataOut: out})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ret).To(Equal(xdpPass), "should pass through, not redirect")
-			Expect(out).To(Equal(in), "packet should be unmodified on a nat_map miss")
+			Expect(ret).To(Equal(xdpDrop), "a nat_map miss on a port the pod's own NAT block owns is never a real reply")
+		})
+	})
+
+	Context("dst_kind is POD_IP but nat_map misses, dst port outside the pod's own NAT block", func() {
+		It("passes the packet through, leaving it to whatever else legitimately delivers to that port", func() {
+			podIP := net.ParseIP("10.0.0.5")
+			serverIP := net.ParseIP("93.184.216.34")
+			const servicePort uint16 = 8080
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, 40000, 40099) // pod's own NAT block -- doesn't cover servicePort
+
+			in := buildTCP(serverIP, podIP, 80, servicePort, tcpACK)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatXdp.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(xdpPass), "a port mooring doesn't manage for this pod is not mooring's concern")
+			Expect(out).To(Equal(in), "packet should be unmodified")
 		})
 	})
 

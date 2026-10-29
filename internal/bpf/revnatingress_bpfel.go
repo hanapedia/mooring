@@ -38,6 +38,13 @@ type RevnatIngressNatMapVal struct {
 	ClosingNs uint64
 }
 
+type RevnatIngressPodPortKey struct {
+	_     structs.HostLayout
+	PodIp uint32
+	Port  uint16
+	_     [2]byte
+}
+
 type RevnatIngressTargetCidrVal struct {
 	_         structs.HostLayout
 	Addr      uint32
@@ -50,6 +57,7 @@ type RevnatIngressTargetCidrVal struct {
 const (
 	RevnatIngressMapDstKind             = "dst_kind"
 	RevnatIngressMapNatMap              = "nat_map"
+	RevnatIngressMapPodNatPorts         = "pod_nat_ports"
 	RevnatIngressMapPortRangeInner      = "port_range_inner"
 	RevnatIngressMapPortRangeLookupIcmp = "port_range_lookup_icmp"
 	RevnatIngressMapPortRangeLookupTcp  = "port_range_lookup_tcp"
@@ -109,6 +117,7 @@ type RevnatIngressProgramSpecs struct {
 type RevnatIngressMapSpecs struct {
 	DstKind             *ebpf.MapSpec `ebpf:"dst_kind"`
 	NatMap              *ebpf.MapSpec `ebpf:"nat_map"`
+	PodNatPorts         *ebpf.MapSpec `ebpf:"pod_nat_ports"`
 	PortRangeInner      *ebpf.MapSpec `ebpf:"port_range_inner"`
 	PortRangeLookupIcmp *ebpf.MapSpec `ebpf:"port_range_lookup_icmp"`
 	PortRangeLookupTcp  *ebpf.MapSpec `ebpf:"port_range_lookup_tcp"`
@@ -143,6 +152,7 @@ func (o *RevnatIngressObjects) Close() error {
 type RevnatIngressMaps struct {
 	DstKind             *ebpf.Map `ebpf:"dst_kind"`
 	NatMap              *ebpf.Map `ebpf:"nat_map"`
+	PodNatPorts         *ebpf.Map `ebpf:"pod_nat_ports"`
 	PortRangeInner      *ebpf.Map `ebpf:"port_range_inner"`
 	PortRangeLookupIcmp *ebpf.Map `ebpf:"port_range_lookup_icmp"`
 	PortRangeLookupTcp  *ebpf.Map `ebpf:"port_range_lookup_tcp"`
@@ -154,6 +164,7 @@ func (m *RevnatIngressMaps) Close() error {
 	return _RevnatIngressClose(
 		m.DstKind,
 		m.NatMap,
+		m.PodNatPorts,
 		m.PortRangeInner,
 		m.PortRangeLookupIcmp,
 		m.PortRangeLookupTcp,

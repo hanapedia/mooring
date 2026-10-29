@@ -151,6 +151,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 			Expect(k8sClient.Create(ctx, npr)).To(Succeed())
 
 			eventually(func() bool { return mockPodIPKind.hasAdded(podIP) })
+			eventually(func() bool { return mockPodNatPorts.hasAdded(podIP, 2000, 2099) })
 		})
 
 		It("does not add the pod IP for a remote-node NPR", func() {
@@ -163,6 +164,7 @@ var _ = Describe("NATPortRange sync controller", func() {
 				return mockPortRangeLookup.hasAdded(extIP, podIP, 2100, 2199, 6)
 			})
 			consistently(func() bool { return !mockPodIPKind.hasAdded(podIP) })
+			consistently(func() bool { return !mockPodNatPorts.hasAdded(podIP, 2100, 2199) })
 		})
 
 		It("removes the pod IP once the last local NPR for it goes stale", func() {
@@ -175,11 +177,15 @@ var _ = Describe("NATPortRange sync controller", func() {
 			eventually(func() bool { return mockPodIPKind.hasAdded(podIP) })
 
 			// Mark the first NPR stale; the pod IP is still referenced by nprB,
-			// so it must not be removed yet.
+			// so it must not be removed yet. pod_nat_ports isn't ref-counted
+			// per pod IP like dst_kind -- it's removed per allocation's own
+			// port range, and nprA/nprB use disjoint ranges, so nprA's range
+			// comes out immediately regardless of nprB.
 			markStale(nprA.Name)
 			eventually(func() bool {
 				return mockPortRangeLookup.hasRemoved("203.0.115.32", podIP, 2200, 2299, 6)
 			})
+			eventually(func() bool { return mockPodNatPorts.hasRemoved(podIP, 2200, 2299) })
 			consistently(func() bool { return !mockPodIPKind.hasRemoved(podIP) })
 
 			// Now mark the second (last) NPR for this pod stale too.
@@ -221,6 +227,8 @@ var _ = Describe("NATPortRange sync controller", func() {
 			eventually(func() bool {
 				return mockPortRangeLookup.hasRemoved(oldExtIP, podIP, oldStart, oldEnd, 6)
 			})
+			eventually(func() bool { return mockPodNatPorts.hasAdded(podIP, newStart, newEnd) })
+			eventually(func() bool { return mockPodNatPorts.hasRemoved(podIP, oldStart, oldEnd) })
 		})
 	})
 })

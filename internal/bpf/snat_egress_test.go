@@ -161,7 +161,8 @@ var _ = Describe("snat_egress", func() {
 
 			p.addTargetCIDR(serverIP)
 			p.addSinglePortNatConfig(podIP, serverIP, 32, extIP, extPort)
-			p.addDstKindPodIP(podIP) // needed for the confirming FIN via revnat_ingress below
+			p.addDstKindPodIP(podIP)                  // needed for the confirming FIN via revnat_ingress below
+			p.addPodNatPorts(podIP, extPort, extPort) // ditto -- revnat_ingress now checks this before nat_map
 
 			runEgress := func(flags uint8) {
 				pkt := buildTCP(podIP, serverIP, podPort, serverPort, flags)
