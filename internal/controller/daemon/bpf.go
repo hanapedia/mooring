@@ -33,6 +33,14 @@ type PortRangeLookupMap interface {
 	Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error
 }
 
+// PodNatPortsMap abstracts the pod_nat_ports flat HASH BPF map, which
+// answers "is this port inside this pod's own allocated NAT block?"
+// independent of protocol or ext IP.
+type PodNatPortsMap interface {
+	Add(podIP net.IP, portStart, portEnd uint16) error
+	Remove(podIP net.IP, portStart, portEnd uint16) error
+}
+
 // NatConfigMap abstracts the nat_config BPF map.
 // Each entry is keyed by (podIP, targetCIDR) and holds all external-IP allocations
 // for that (pod, target-CIDR) pair.
@@ -68,6 +76,17 @@ func (RealPortRangeLookupMap) Add(extIP, podIP net.IP, portStart, portEnd uint16
 
 func (RealPortRangeLookupMap) Remove(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) error {
 	return maps.RemovePortRange(extIP, podIP, portStart, portEnd, proto)
+}
+
+// RealPodNatPortsMap is the production implementation of PodNatPortsMap.
+type RealPodNatPortsMap struct{}
+
+func (RealPodNatPortsMap) Add(podIP net.IP, portStart, portEnd uint16) error {
+	return maps.AddPodNatPorts(podIP, portStart, portEnd)
+}
+
+func (RealPodNatPortsMap) Remove(podIP net.IP, portStart, portEnd uint16) error {
+	return maps.RemovePodNatPorts(podIP, portStart, portEnd)
 }
 
 // RealNatConfigMap is the production implementation of NatConfigMap.

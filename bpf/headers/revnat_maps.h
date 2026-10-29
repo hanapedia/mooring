@@ -69,3 +69,33 @@ struct {
   __type(key, __be32); // ext_ip network byte order
   __array(values, struct port_range_inner_t);
 } port_range_lookup_icmp SEC(".maps");
+
+// Key for pod_nat_ports below. port is host byte order, matching
+// port_range_inner's key convention (bpf_ntohs(nat_port)).
+struct pod_port_key {
+  __be32 pod_ip;
+  __u16 port;
+};
+
+// Answers "is port P inside this client pod's own allocated NAT block(s)?"
+// -- independent of protocol, since AddPortRange registers a pod's block
+// identically across all three port_range_lookup_* maps (block membership
+// isn't itself protocol-specific). Used only by revnat_core.h's
+// DST_KIND_POD_IP branch, to scope its nat_map-miss drop to a pod's own
+// managed range: anything outside it (e.g. a Service's real listening
+// port, reached via a load balancer's DSR dispatch) was never mooring's
+// concern and is left to pass through untouched.
+//
+// A plain HASH, not HASH_OF_MAPS + a 65536-slot ARRAY per pod like
+// port_range_lookup_* -- this scales with the number of ports actually
+// allocated across all local client pods, not a fixed per-pod reservation,
+// which matters once there are many client pods on one node.
+// BPF_F_NO_PREALLOC keeps that scaling real rather than eagerly committing
+// max_entries worth of memory upfront.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __uint(max_entries, 131072);
+  __type(key, struct pod_port_key);
+  __type(value, __u8); // existence is the signal; value is unused
+} pod_nat_ports SEC(".maps");

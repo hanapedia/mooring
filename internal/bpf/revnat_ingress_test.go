@@ -33,6 +33,7 @@ var _ = Describe("revnat_ingress", func() {
 
 			p.addTargetCIDR(serverIP)
 			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, natPort, natPort)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
 			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
@@ -83,20 +84,40 @@ var _ = Describe("revnat_ingress", func() {
 		})
 	})
 
-	Context("dst_kind is POD_IP but nat_map misses", func() {
-		It("passes the packet through unmodified, not redirected", func() {
+	Context("dst_kind is POD_IP but nat_map misses, dst port inside the pod's own NAT block", func() {
+		It("drops the packet instead of passing it through to the pod", func() {
 			podIP := net.ParseIP("10.0.0.5")
 			serverIP := net.ParseIP("93.184.216.34")
+			const natPort uint16 = 40000
 
 			p.addTargetCIDR(serverIP)
 			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, 40000, 40099)
 
-			in := buildTCP(serverIP, podIP, 80, 40000, tcpACK)
+			in := buildTCP(serverIP, podIP, 80, natPort, tcpACK)
 			out := make([]byte, len(in))
 			ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(ret).To(Equal(tcxNext), "should pass through, not redirect")
-			Expect(out).To(Equal(in), "packet should be unmodified on a nat_map miss")
+			Expect(ret).To(Equal(tcDrop), "a nat_map miss on a port the pod's own NAT block owns is never a real reply")
+		})
+	})
+
+	Context("dst_kind is POD_IP but nat_map misses, dst port outside the pod's own NAT block", func() {
+		It("passes the packet through, leaving it to whatever else legitimately delivers to that port", func() {
+			podIP := net.ParseIP("10.0.0.5")
+			serverIP := net.ParseIP("93.184.216.34")
+			const servicePort uint16 = 8080
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, 40000, 40099) // pod's own NAT block -- doesn't cover servicePort
+
+			in := buildTCP(serverIP, podIP, 80, servicePort, tcpACK)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcxNext), "a port mooring doesn't manage for this pod is not mooring's concern")
+			Expect(out).To(Equal(in), "packet should be unmodified")
 		})
 	})
 
@@ -161,6 +182,7 @@ var _ = Describe("revnat_ingress", func() {
 
 			p.addTargetCIDR(serverIP)
 			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, natPort, natPort)
 
 			snatKey := natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT)
 			revnatKey := natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT)
@@ -226,6 +248,7 @@ var _ = Describe("revnat_ingress", func() {
 
 			p.addTargetCIDR(serverIP)
 			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, natPort, natPort)
 
 			snatKey := natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT)
 			revnatKey := natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT)

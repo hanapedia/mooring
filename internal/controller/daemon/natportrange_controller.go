@@ -33,17 +33,19 @@ type NATPortRangeSyncReconciler struct {
 	PortRangeLookup PortRangeLookupMap
 	NatConfig       NatConfigMap
 	PodIPKind       PodIPKindMap
+	PodNatPorts     PodNatPortsMap
 	mu              sync.Mutex
 	synced          map[string]syncedNPR // key: NPR name
 }
 
-func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, natConfig NatConfigMap, podIPKind PodIPKindMap) *NATPortRangeSyncReconciler {
+func NewNATPortRangeSyncReconciler(c client.Client, nodeName string, portRangeLookup PortRangeLookupMap, natConfig NatConfigMap, podIPKind PodIPKindMap, podNatPorts PodNatPortsMap) *NATPortRangeSyncReconciler {
 	return &NATPortRangeSyncReconciler{
 		Client:          c,
 		NodeName:        nodeName,
 		PortRangeLookup: portRangeLookup,
 		NatConfig:       natConfig,
 		PodIPKind:       podIPKind,
+		PodNatPorts:     podNatPorts,
 		synced:          make(map[string]syncedNPR),
 	}
 }
@@ -87,6 +89,14 @@ func (r *NATPortRangeSyncReconciler) syncStale(ctx context.Context, npr *v1alpha
 	}
 
 	if npr.Spec.NodeName == r.NodeName {
+		// pod_nat_ports: local-node-only, like dst_kind's POD_IP side -- it's
+		// only ever consulted on the pod's own home node.
+		for _, a := range npr.Spec.Allocations {
+			if err := r.PodNatPorts.Remove(podIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("remove pod nat ports: %w", err)
+			}
+		}
+
 		extIPs := uniqueExtIPs(npr.Spec.Allocations)
 		for _, cidrStr := range npr.Spec.TargetCIDRs {
 			_, cidr, err := net.ParseCIDR(cidrStr)
@@ -141,6 +151,19 @@ func (r *NATPortRangeSyncReconciler) syncAlive(ctx context.Context, npr *v1alpha
 	}
 
 	if npr.Spec.NodeName == r.NodeName {
+		// pod_nat_ports: local-node-only, like dst_kind's POD_IP side -- it's
+		// only ever consulted on the pod's own home node.
+		for _, a := range toRemove {
+			if err := r.PodNatPorts.Remove(podIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("remove pod nat ports: %w", err)
+			}
+		}
+		for _, a := range toAdd {
+			if err := r.PodNatPorts.Add(podIP, uint16(a.PortStart), uint16(a.PortEnd)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("add pod nat ports: %w", err)
+			}
+		}
+
 		// dst_kind (pod-IP side): Put is idempotent, so just always ensure the
 		// entry exists for a local NPR rather than tracking "first sync" --
 		// ref-counting only matters on removal (syncStale/maybeRemovePodIPKind),

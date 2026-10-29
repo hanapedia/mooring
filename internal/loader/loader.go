@@ -174,6 +174,7 @@ func loadRevnatTCX(ifindex int, mapReplacements map[string]*ebpf.Map) error {
 		"port_range_lookup_tcp":  objs.PortRangeLookupTcp,
 		"port_range_lookup_udp":  objs.PortRangeLookupUdp,
 		"port_range_lookup_icmp": objs.PortRangeLookupIcmp,
+		"pod_nat_ports":          objs.PodNatPorts,
 	} {
 		if err := m.Pin(filepath.Join(mapsDir, name)); err != nil {
 			return fmt.Errorf("pin map %s: %w", name, err)
@@ -250,6 +251,7 @@ func loadRevnatXDP(ifindex int, mapReplacements map[string]*ebpf.Map) error {
 		"port_range_lookup_tcp":  objs.PortRangeLookupTcp,
 		"port_range_lookup_udp":  objs.PortRangeLookupUdp,
 		"port_range_lookup_icmp": objs.PortRangeLookupIcmp,
+		"pod_nat_ports":          objs.PodNatPorts,
 	} {
 		if err := m.Pin(filepath.Join(mapsDir, name)); err != nil {
 			return fmt.Errorf("pin map %s: %w", name, err)

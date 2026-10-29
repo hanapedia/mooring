@@ -45,6 +45,7 @@ var (
 	mockPortRangeLookup *recordingPortRangeLookupMap
 	mockNatConfig       *recordingNatConfigMap
 	mockPodIPKind       *recordingPodIPKindMap
+	mockPodNatPorts     *recordingPodNatPortsMap
 	mockRouteAdvertiser *recordingRouteAdvertiser
 )
 
@@ -85,6 +86,7 @@ var _ = BeforeSuite(func() {
 	mockPortRangeLookup = &recordingPortRangeLookupMap{}
 	mockNatConfig = &recordingNatConfigMap{}
 	mockPodIPKind = &recordingPodIPKindMap{}
+	mockPodNatPorts = &recordingPodNatPortsMap{}
 	mockRouteAdvertiser = &recordingRouteAdvertiser{}
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -120,7 +122,7 @@ var _ = BeforeSuite(func() {
 
 	Expect(daemon.NewNATConfigReconciler(mgr.GetClient(), testNodeName, mockTargetCIDR, mockExtIPKind, mockRouteAdvertiser).SetupWithManager(mgr)).To(Succeed())
 
-	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockNatConfig, mockPodIPKind).SetupWithManager(mgr)).To(Succeed())
+	Expect(daemon.NewNATPortRangeSyncReconciler(mgr.GetClient(), testNodeName, mockPortRangeLookup, mockNatConfig, mockPodIPKind, mockPodNatPorts).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()
@@ -331,6 +333,53 @@ func (m *recordingPortRangeLookupMap) hasRemoved(extIP, podIP string, portStart,
 	defer m.mu.Unlock()
 	for _, c := range m.removeCalls {
 		if c.extIP == extIP && c.podIP == podIP && c.portStart == portStart && c.portEnd == portEnd && c.proto == proto {
+			return true
+		}
+	}
+	return false
+}
+
+type podNatPortsCall struct {
+	podIP              string
+	portStart, portEnd uint16
+}
+
+type recordingPodNatPortsMap struct {
+	mu          sync.Mutex
+	addCalls    []podNatPortsCall
+	removeCalls []podNatPortsCall
+}
+
+func (m *recordingPodNatPortsMap) Add(podIP net.IP, portStart, portEnd uint16) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.addCalls = append(m.addCalls, podNatPortsCall{podIP.String(), portStart, portEnd})
+	return nil
+}
+
+func (m *recordingPodNatPortsMap) Remove(podIP net.IP, portStart, portEnd uint16) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeCalls = append(m.removeCalls, podNatPortsCall{podIP.String(), portStart, portEnd})
+	return nil
+}
+
+func (m *recordingPodNatPortsMap) hasAdded(podIP string, portStart, portEnd uint16) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.addCalls {
+		if c.podIP == podIP && c.portStart == portStart && c.portEnd == portEnd {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *recordingPodNatPortsMap) hasRemoved(podIP string, portStart, portEnd uint16) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.removeCalls {
+		if c.podIP == podIP && c.portStart == portStart && c.portEnd == portEnd {
 			return true
 		}
 	}

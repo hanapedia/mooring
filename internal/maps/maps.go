@@ -218,6 +218,29 @@ func AddPortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8) e
 	return nil
 }
 
+// AddPodNatPorts marks every port in [portStart, portEnd] as belonging to
+// podIP's own NAT block, in the flat pod_nat_ports map. Unlike
+// AddPortRange, this isn't per-ext-IP or per-protocol -- block membership
+// is the same fact regardless of which ext IP or protocol a connection
+// ends up using -- see pod_nat_ports in bpf/headers/revnat_maps.h. Port is
+// host byte order, matching the BPF-side bpf_ntohs(nat_port) lookup.
+func AddPodNatPorts(podIP net.IP, portStart, portEnd uint16) error {
+	m, err := openMap("pod_nat_ports")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	podIPVal := ipToUint32(podIP)
+	for port := portStart; port <= portEnd; port++ {
+		key := mooringbpf.RevnatIngressPodPortKey{PodIp: podIPVal, Port: port}
+		if err := m.Put(key, uint8(1)); err != nil {
+			return fmt.Errorf("port %d: %w", port, err)
+		}
+	}
+	return nil
+}
+
 // RemoveNatConfigAllocs removes the nat_config allocations for the given
 // extIPs from the (podIP, targetCIDR) entry. Slots for ext-IPs not in the
 // list are left intact. If all allocations are removed, the entry is deleted
@@ -415,6 +438,25 @@ func RemovePortRange(extIP, podIP net.IP, portStart, portEnd uint16, proto uint8
 			if err := inner.Put(uint32(port), zero); err != nil {
 				return fmt.Errorf("zero port %d: %w", port, err)
 			}
+		}
+	}
+	return nil
+}
+
+// RemovePodNatPorts deletes podIP's entries for [portStart, portEnd] from
+// pod_nat_ports.
+func RemovePodNatPorts(podIP net.IP, portStart, portEnd uint16) error {
+	m, err := openMap("pod_nat_ports")
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	podIPVal := ipToUint32(podIP)
+	for port := portStart; port <= portEnd; port++ {
+		key := mooringbpf.RevnatIngressPodPortKey{PodIp: podIPVal, Port: port}
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("port %d: %w", port, err)
 		}
 	}
 	return nil
