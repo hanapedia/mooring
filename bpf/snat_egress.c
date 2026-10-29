@@ -228,11 +228,14 @@ int snat_egress(struct __sk_buff *skb) {
   if (!tcv)
     return CTX_PASS;
 
+  if (ip_header_unparseable(iph))
+    return CTX_DROP;
+
   __be32 pod_ip = iph->saddr;
   __be32 server_ip = iph->daddr;
 
   __be16 pod_port, server_port;
-  __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
+  __u32 l4_off = sizeof(struct ethhdr) + ip_hdr_len(iph);
   __u32 csum_off;
   __u8 tcp_syn, tcp_fin, tcp_rst, tcp_ack;
 

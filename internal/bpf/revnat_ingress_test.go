@@ -301,4 +301,65 @@ var _ = Describe("revnat_ingress", func() {
 			Expect(ret).To(Equal(tcDrop), "a bare SYN is never a legitimate reply and must be dropped")
 		})
 	})
+
+	Context("IP header with options (ihl > 5)", func() {
+		It("still parses the real TCP header correctly, past the options", func() {
+			podIP := net.ParseIP("10.0.0.52")
+			serverIP := net.ParseIP("93.184.216.52")
+			extIP := net.ParseIP("203.0.113.52")
+			const podPort, serverPort, natPort uint16 = 53425, 80, 40005
+			const ihl = 8 // 5 + 3 option words, e.g. mirroring Cilium's DSR "opt" dispatch
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+			p.addPodNatPorts(podIP, natPort, natPort)
+
+			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
+			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
+				To(Succeed(), "seed revnat entry")
+
+			in := buildTCPWithIHL(serverIP, podIP, serverPort, natPort, tcpACK, ihl, 0)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcxNext))
+
+			_, l4 := parseEthIPv4WithIHL(out, ihl)
+			Expect(binary.BigEndian.Uint16(l4[2:4])).To(Equal(podPort), "dst port, past the IP options, should be rewritten")
+		})
+	})
+
+	Context("malformed IP header (ihl < 5)", func() {
+		It("is dropped rather than parsed at a bogus offset", func() {
+			podIP := net.ParseIP("10.0.0.53")
+			serverIP := net.ParseIP("93.184.216.53")
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+
+			in := buildTCPWithIHL(serverIP, podIP, 80, 40000, tcpACK, 4, 0)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcDrop), "ihl < 5 is not a valid IP header")
+		})
+	})
+
+	Context("non-first IP fragment", func() {
+		It("is dropped rather than its payload bytes read as a port", func() {
+			podIP := net.ParseIP("10.0.0.54")
+			serverIP := net.ParseIP("93.184.216.54")
+
+			p.addTargetCIDR(serverIP)
+			p.addDstKindPodIP(podIP)
+
+			// Non-zero fragment offset: a later fragment of some larger
+			// datagram, carrying no L4 header of its own.
+			in := buildTCPWithIHL(serverIP, podIP, 80, 40000, tcpACK, 5, 185)
+			out := make([]byte, len(in))
+			ret, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcDrop), "a non-first fragment has no real L4 header to parse")
+		})
+	})
 })
