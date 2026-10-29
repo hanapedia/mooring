@@ -49,13 +49,12 @@ struct nat_map_val {
   // 0 = not closing. Else bpf_ktime_get_ns() at the moment THIS entry's own
   // direction (pod-side for a snat entry, server-side for a revnat entry)
   // most recently showed a FIN or RST with no resumed ordinary traffic
-  // since. Set only from genuine traffic actually seen in this entry's own
-  // direction -- never mirrored from the peer entry -- so a one-directional
-  // off-path spoofer can only ever set this on the entry facing them, never
-  // the other side's; see nat_map_track_tcp_close for why that's what makes
-  // deletion safe. Also doubles as the staleness timestamp for the
-  // allocator's reclaim check (snat_egress.c's try_alloc_port). UDP/ICMP
-  // never set this, so they're never reclaimed that way.
+  // since. Set only from traffic actually seen in this entry's own
+  // direction -- never mirrored from the peer entry; see
+  // nat_map_track_tcp_close for the deletion rule this enables. Also
+  // doubles as the staleness timestamp for the allocator's reclaim check
+  // (snat_egress.c's try_alloc_port). UDP/ICMP never set this, so they're
+  // never reclaimed that way.
   __u64 closing_ns;
 };
 
@@ -181,11 +180,10 @@ static __always_inline long nat_map_delete_revnat(__be32 server_ip,
 // so both callers pass the same five scalars; own_kind just says which one
 // own is, to find the peer when needed.
 //
-// See nat_map_val's closing_ns comment above for why deletion (own and peer
-// both showing their own FIN/RST) can't be forced by a one-directional
-// spoofer. own/peer are plain pointers into the map's own backing memory,
-// so writing through them needs no bpf_map_update_elem. Only TCP calls
-// this, so proto is always IPPROTO_TCP.
+// See nat_map_val's closing_ns comment above for what each entry's own
+// field means. own/peer are plain pointers into the map's own backing
+// memory, so writing through them needs no bpf_map_update_elem. Only TCP
+// calls this, so proto is always IPPROTO_TCP.
 static __always_inline void
 nat_map_track_tcp_close(__be32 server_ip, __be32 pod_ip, __be16 server_port,
                         __be16 nat_port, __be16 pod_port,

@@ -74,16 +74,22 @@ means the packet was never meant for mooring at all (e.g. another system, such a
 feature, happens to share the same `targetCIDRs`), and it is passed through untouched without
 even an LPM walk. Only once dst matches does it check src against `target_cidrs` — a secondary
 filter at that point, not a correctness boundary (`nat_map`'s exact src match is the real
-authority), worth paying for only because dst is already known to be ours:
+authority), worth paying for only because dst is already known to be ours. Next, any TCP packet
+that is a SYN without an ACK set is dropped outright, before either branch below:
 
 - If `dst_kind` resolves `EXT_IP`, it performs stage 1 (IP revNAT) and then attempts stage 2
   immediately — the **same-node optimization** succeeds when `nat_map` has a revnat entry for the
   pod (i.e., the pod is local). If it misses, the packet is forwarded by BGP to the pod's node
   where the uplink ingress program there handles stage 2.
 - If `dst_kind` resolves `POD_IP` (dst is one of this node's local client pods — cross-node: stage
-  1 ran on another node, or this traffic was never a tracked NAT flow at all), stage 2 is attempted
-  directly; a `nat_map` miss here is passed through, not redirected, since no rewrite happened this
-  pass to justify forwarding it anywhere.
+  1 ran on another node, or direct delivery to the pod's own IP), stage 2 is attempted directly.
+  On a `nat_map` miss, `pod_nat_ports` (see [BPF Maps](#bpf-maps)) is checked: if the destination
+  port falls inside this pod's own allocated NAT block, the packet is dropped; otherwise it is
+  passed through untouched.
+
+The egress program applies a matching rule on a new flow (no existing snat entry): a TCP packet
+is only allocated a NAT mapping if it is a pure SYN (no ACK); anything else is dropped rather than
+allocated or passed through.
 
 **Conntrack bypass:** on a transit node (stage 1 ran here, pod is on another node), conntrack
 would see the rewritten SYN-ACK as a new, untracked connection and mark it INVALID — causing
@@ -419,28 +425,29 @@ longer drives loop iteration count.
 
 ### Connection tracking and port reclamation
 
-Because allocation is now collision-driven rather than a one-way counter, a NAT port can be reused
+Because allocation is collision-driven rather than a one-way counter, a NAT port can be reused
 as soon as the table says the old connection is gone. For TCP, this is done actively:
 
 - Both the egress program (pod→server packets) and the ingress program's stage 2 (server→pod
   packets) inspect TCP flags on every packet of a known flow.
-- The first FIN or RST seen (either direction) stamps `closing_ns = bpf_ktime_get_ns()` on both the
-  connection's snat entry and its paired revnat entry in `nat_map`.
-- A **second** FIN or RST seen afterward (either direction, combined with ACK) confirms the close
-  and deletes both entries immediately. Requiring a second terminating segment — rather than any
-  ACK — specifically avoids tearing down a half-closed connection (one side FIN'd, the other still
-  sending data) onto a fresh port mid-flow.
-- If the close is never confirmed (crash, dropped FIN/RST, network partition), the entries are left
-  in place — not evicted proactively — but become eligible for reclamation: a later allocation whose
-  collision check (against the revnat entry) finds one marked `closing` for longer than
+- `closing_ns` is tracked independently per entry: it is set on a connection's snat entry only by
+  that connection's own egress (pod-side) traffic, and on its revnat entry only by that
+  connection's own ingress (server-side) traffic — never mirrored from one entry to the other.
+- The first FIN or RST seen from a given side stamps that side's own entry with
+  `closing_ns = bpf_ktime_get_ns()`, if not already set.
+- Once a FIN or RST has been stamped on both the snat and revnat entries (one from each side,
+  independently), both entries are deleted immediately.
+- If ordinary (non-FIN/RST) traffic is seen afterward from the side whose entry is marked
+  `closing`, that entry's `closing_ns` is reset to 0.
+- An entry whose `closing_ns` is set and has not been reset is eligible for reclamation: a later
+  allocation whose collision check finds a revnat entry with `closing_ns` set for longer than
   `NAT_CLOSING_STALE_NS` (10s) treats it as free, reclaiming the port and deleting the stale snat
-  entry (the stale revnat entry is overwritten naturally once the new allocation writes to that same
-  key). An entry that was never marked `closing` at all is never reclaimed this way, no matter how
-  old — only LRU eviction of the whole map applies to it.
+  entry (the stale revnat entry is overwritten naturally once the new allocation writes to that
+  same key). An entry whose `closing_ns` is 0 is never reclaimed this way, no matter how old —
+  only LRU eviction of the whole map applies to it.
 
-UDP and ICMP entries never get marked `closing` (there's no equivalent signal), so they're never
-reclaimed by this mechanism — LRU eviction of the whole map is their only cleanup path, same as
-before this change.
+UDP and ICMP entries never set `closing_ns`, so they're never reclaimed by this mechanism — LRU
+eviction of the whole map is their only cleanup path.
 
 ### Target CIDRs map
 
@@ -492,6 +499,21 @@ each can only be known where its own data lives:
 Ext IPs and pod IPs are architecturally disjoint address spaces (external pool vs. cluster pod
 CIDR), so the two kinds sharing one map carries no collision risk.
 
+### pod_nat_ports map (ingress, local node only)
+
+Answers whether a given port falls inside a local client pod's own allocated NAT block,
+independent of protocol or external IP.
+
+| Field | Role |
+|---|---|
+| Key: `{pod-IP, port}` | port in host byte order |
+| Value: unused | presence in the map is the signal |
+
+Type: `BPF_MAP_TYPE_HASH` with `BPF_F_NO_PREALLOC`. Populated by the daemon's NATPortRange sync
+controller alongside the per-protocol port-range lookup maps, local-node-only (same locality as
+`dst_kind`'s `POD_IP` side). Consulted by the ingress program's stage 2, on a `dst_kind = POD_IP`
+`nat_map` miss, to decide whether to drop the packet or pass it through.
+
 ---
 
 ## Packet Flow
@@ -507,6 +529,8 @@ client pod
   ▼
 TCX egress (head) — node uplink  (all nodes; filtered by target_cidrs LPM lookup)
   │  looks up dst in target_cidrs LPM → matched CIDR {cidr-addr, cidr-prefixlen} (or miss → pass)
+  │  existing nat_map snat entry (reuse) → skip to SNAT below
+  │  no existing entry (new flow) → TCP: pure SYN (no ACK)? no → drop; yes → continue
   │  looks up (pod-IP, cidr-addr, cidr-prefixlen) in nat_config → selects externalIP + allocates NAT-port
   │  writes nat_map snat entry:   {pod-IP, pod-port, server-IP, server-port}   → {externalIP, NAT-port}
   │  writes nat_map revnat entry: {server-IP, server-port, pod-IP, NAT-port}   → {externalIP, pod-port}
@@ -540,6 +564,8 @@ TCX ingress (head) — node uplink  (combined stage 1+2 revNAT, all nodes)
   │  authority below)
   │    miss → pass, untouched
   │
+  │  TCP SYN without ACK → drop
+  │
   │  [case A] dst_kind = EXT_IP  → Stage 1
   │    looks up port-range-map[externalIP][NAT-port] → pod-IP
   │    rewrites dst: externalIP → pod-IP
@@ -553,8 +579,9 @@ TCX ingress (head) — node uplink  (combined stage 1+2 revNAT, all nodes)
   │  [case B] dst_kind = POD_IP  → Stage 2 (cross-node return, or direct)
   │    looks up nat_map revnat entry: {server-IP, server-port, pod-IP, NAT-port} → {externalIP, pod-port}
   │    hit  → rewrites dst-port: NAT-port → pod-port
-  │    miss → pass, untouched (no rewrite happened this pass to justify
-  │           forwarding anywhere — this was never a tracked NAT flow)
+  │    miss → looks up (pod-IP, NAT-port) in pod_nat_ports
+  │             in pod's own NAT block → drop
+  │             otherwise               → pass, untouched
   ▼
 client pod  (src=server-IP:server-port, dst=pod-IP:pod-port ✓)
 ```
@@ -869,6 +896,12 @@ cleanup via the grace period mechanism.
 - **Cilium mode requires** Cilium with BPF host routing and the CiliumDatapathPlugin API. It is
   tested as a secondary target and may have ordering dependencies with other TC programs on the
   uplink interface.
+- **Fragmented IP traffic is not supported.** Only the first fragment of a datagram carries a
+  real L4 header; `revnat_ingress`/`revnat_xdp` and `snat_egress` drop every fragment outright
+  (`ip_header_unparseable` in `bpf/headers/l4.h`) rather than risk reading a later fragment's
+  payload bytes as port/flag fields. A datagram that requires fragmentation (e.g. a large EDNS
+  DNS response) does not arrive intact through mooring today — see
+  [Open Questions](#open-questions) for a possible future design.
 
 ---
 
@@ -890,3 +923,23 @@ cleanup via the grace period mechanism.
   index; outer map is pinned; inner maps are referenced by FD stored in the outer map.
 - **nat_config map key**: compound `{pod-IP, cidr-addr, cidr-prefixlen}` so a pod matching
   multiple NATConfigs gets independent ext-IP pools per target CIDR.
+
+### Future work
+
+- **Fragment support.** Only the first fragment (offset 0) of an IP datagram carries a real L4
+  header; every later fragment is a raw payload continuation, correlated to the first purely at
+  the IP layer via `(src-IP, dst-IP, proto, IP-ID)` — not by port. A tracking map keyed on that
+  tuple, written when the first fragment makes its usual stage-1/stage-2 decision (which pod it
+  resolves to, and whether it's allowed or dropped) and consulted by later fragments in place of
+  L4 parsing, would let mooring replay the *same* IP-level rewrite and the *same* verdict for the
+  rest of the datagram, rather than drop it outright as it does today. Stage 2's port translation
+  itself never needs to extend past the first fragment, since no later fragment carries a port —
+  they only need to land on the same pod IP so the pod's own kernel can reassemble the complete
+  datagram. Replaying the *verdict*, not just the rewrite, matters: blindly letting every later
+  fragment through would let anyone who can spoof a plausible non-first fragment bypass whatever
+  the first fragment's own `nat_map`/`pod_nat_ports` check decided. This also needs real expiry
+  logic — IP ID is only 16 bits per `(src, dst, proto)`, so it's reused, and a stale tracking
+  entry has to expire (roughly matching real fragment-reassembly timeouts, ~30s) or it could get
+  replayed onto an unrelated later datagram between the same two hosts. Not yet built — the
+  current behavior (drop every fragment) is simpler but means a fragmented datagram never
+  arrives intact.

@@ -16,6 +16,7 @@
 // follows).
 
 #include "vmlinux.h"
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
 // Raw per-protocol L4 extraction, wire-header-order (source/dest). ICMP has
@@ -32,6 +33,27 @@ struct l4_raw {
   __u8 tcp_syn, tcp_fin, tcp_rst, tcp_ack; // only meaningful if proto == IPPROTO_TCP
 };
 
+// Is iph unparseable as a single, complete IP+L4 header? Two independent
+// reasons: ihl < 5 is a malformed header (shorter than the IPv4 minimum,
+// so even the base IP fields can't be trusted); a non-first fragment
+// (frag_off's MF bit or a nonzero offset) carries no L4 header at all --
+// it's a raw continuation of the original datagram's payload, so there's
+// nothing meaningful to read at the assumed L4 offset. ihl > 5 (IP
+// options) is deliberately *not* rejected here -- see ip_hdr_len below,
+// which is what lets a packet with options still be parsed correctly
+// instead of needing to reject it.
+static __always_inline int ip_header_unparseable(struct iphdr *iph) {
+  return iph->ihl < 5 ||
+         (bpf_ntohs(iph->frag_off) & (IP_MF | IP_OFFSET)) != 0;
+}
+
+// Byte length of iph's header including options, for callers that have
+// already rejected ip_header_unparseable(iph) -- ihl must be validated
+// first, since it comes straight from the packet.
+static __always_inline __u32 ip_hdr_len(struct iphdr *iph) {
+  return iph->ihl * 4;
+}
+
 // l4_off is the byte offset of the L4 header from the start of the packet
 // (used to turn offsetof(...) into an absolute csum_off). Returns 0 on a
 // bounds-check miss (header doesn't fit before data_end); *out is left
@@ -39,9 +61,10 @@ struct l4_raw {
 static __always_inline int parse_l4_raw(void *data_end, struct iphdr *iph,
                                         __u32 l4_off, __u8 proto,
                                         struct l4_raw *out) {
+  void *l4 = (void *)iph + ip_hdr_len(iph);
   switch (proto) {
   case IPPROTO_TCP: {
-    struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
+    struct tcphdr *tcph = l4;
     if ((void *)(tcph + 1) > data_end)
       return 0;
     out->src_port = tcph->source;
@@ -54,7 +77,7 @@ static __always_inline int parse_l4_raw(void *data_end, struct iphdr *iph,
     return 1;
   }
   case IPPROTO_UDP: {
-    struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
+    struct udphdr *udph = l4;
     if ((void *)(udph + 1) > data_end)
       return 0;
     out->src_port = udph->source;
@@ -63,7 +86,7 @@ static __always_inline int parse_l4_raw(void *data_end, struct iphdr *iph,
     return 1;
   }
   default: { // IPPROTO_ICMP
-    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    struct icmphdr *icmph = l4;
     if ((void *)(icmph + 1) > data_end)
       return 0;
     out->icmp_id = icmph->un.echo.id;
@@ -82,18 +105,19 @@ static __always_inline int parse_l4_raw(void *data_end, struct iphdr *iph,
 static __always_inline int write_l4_src_port(void *data_end,
                                              struct iphdr *iph, __u8 proto,
                                              __be16 new_port) {
+  void *l4 = (void *)iph + ip_hdr_len(iph);
   if (proto == IPPROTO_TCP) {
-    struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
+    struct tcphdr *tcph = l4;
     if ((void *)(tcph + 1) > data_end)
       return 0;
     tcph->source = new_port;
   } else if (proto == IPPROTO_UDP) {
-    struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
+    struct udphdr *udph = l4;
     if ((void *)(udph + 1) > data_end)
       return 0;
     udph->source = new_port;
   } else { // ICMP
-    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    struct icmphdr *icmph = l4;
     if ((void *)(icmph + 1) > data_end)
       return 0;
     icmph->un.echo.id = new_port;
@@ -106,18 +130,19 @@ static __always_inline int write_l4_src_port(void *data_end,
 static __always_inline int write_l4_dst_port(void *data_end,
                                              struct iphdr *iph, __u8 proto,
                                              __be16 new_port) {
+  void *l4 = (void *)iph + ip_hdr_len(iph);
   if (proto == IPPROTO_TCP) {
-    struct tcphdr *tcph = (void *)iph + sizeof(struct iphdr);
+    struct tcphdr *tcph = l4;
     if ((void *)(tcph + 1) > data_end)
       return 0;
     tcph->dest = new_port;
   } else if (proto == IPPROTO_UDP) {
-    struct udphdr *udph = (void *)iph + sizeof(struct iphdr);
+    struct udphdr *udph = l4;
     if ((void *)(udph + 1) > data_end)
       return 0;
     udph->dest = new_port;
   } else { // ICMP
-    struct icmphdr *icmph = (void *)iph + sizeof(struct iphdr);
+    struct icmphdr *icmph = l4;
     if ((void *)(icmph + 1) > data_end)
       return 0;
     icmph->un.echo.id = new_port;

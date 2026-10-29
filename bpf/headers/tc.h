@@ -101,6 +101,14 @@
 #define ICMP_ECHOREPLY 0
 #endif
 
+/* IP fragmentation flags, from frag_off (host order) — linux/ip.h */
+#ifndef IP_MF
+#define IP_MF 0x2000
+#endif
+#ifndef IP_OFFSET
+#define IP_OFFSET 0x1FFF
+#endif
+
 /* Address families — linux/socket.h (used by bpf_fib_lookup) */
 #ifndef AF_INET
 #define AF_INET 2

@@ -242,6 +242,57 @@ func buildTCP(src, dst net.IP, sport, dport uint16, flags uint8) []byte {
 	return buildEthIPv4(protoTCP, src, dst, l4)
 }
 
+// buildTCPWithIHL is buildTCP generalized to an arbitrary IHL (IP header
+// words, 4-15): ihl==5 is the normal no-options case; ihl>5 zero-fills
+// that many extra option words between the IP and TCP headers (mirroring
+// e.g. Cilium's DSR "opt" dispatch, which adds a real IP option without
+// otherwise changing the packet); ihl<5 is a malformed header. The
+// physical byte layout always keeps the fixed IP fields (saddr/daddr/etc.)
+// at their normal 20-byte positions, regardless of the ihl value under
+// test -- those fields still need to be there for mooring's own fixed
+// struct iphdr overlay to read them correctly. frag_off is set directly
+// (host-order IP_MF/IP_OFFSET bits already applied by the caller), for
+// building fragment test packets. The IP header checksum is always
+// recomputed over the actual physical header bytes, options included.
+func buildTCPWithIHL(src, dst net.IP, sport, dport uint16, flags uint8, ihl int, fragOff uint16) []byte {
+	l4 := make([]byte, 20)
+	binary.BigEndian.PutUint16(l4[0:2], sport)
+	binary.BigEndian.PutUint16(l4[2:4], dport)
+	l4[12] = 5 << 4
+	l4[13] = flags
+	binary.BigEndian.PutUint16(l4[14:16], 65535)
+	binary.BigEndian.PutUint16(l4[16:18], pseudoHeaderChecksum(src, dst, protoTCP, l4))
+
+	physicalWords := ihl
+	if physicalWords < 5 {
+		physicalWords = 5
+	}
+	ipHdrLen := physicalWords * 4
+	total := ipHdrLen + len(l4)
+	pkt := make([]byte, 14+total)
+	binary.BigEndian.PutUint16(pkt[12:14], 0x0800) // ETH_P_IP
+
+	ipHdr := pkt[14 : 14+ipHdrLen]
+	ipHdr[0] = byte(0x40 | (ihl & 0x0f)) // the (possibly invalid) ihl field value under test
+	binary.BigEndian.PutUint16(ipHdr[2:4], uint16(total))
+	binary.BigEndian.PutUint16(ipHdr[6:8], fragOff)
+	ipHdr[8] = 64
+	ipHdr[9] = protoTCP
+	copy(ipHdr[12:16], src.To4())
+	copy(ipHdr[16:20], dst.To4())
+	binary.BigEndian.PutUint16(ipHdr[10:12], ipChecksum(ipHdr))
+
+	copy(pkt[14+ipHdrLen:], l4)
+	return pkt
+}
+
+// parseEthIPv4WithIHL mirrors parseEthIPv4, but for a packet built with a
+// non-default IHL (buildTCPWithIHL).
+func parseEthIPv4WithIHL(pkt []byte, ihl int) (ipHdr, l4 []byte) {
+	ExpectWithOffset(1, len(pkt)).To(BeNumerically(">=", 14+ihl*4), "packet too short")
+	return pkt[14 : 14+ihl*4], pkt[14+ihl*4:]
+}
+
 func buildUDP(src, dst net.IP, sport, dport uint16) []byte {
 	l4 := make([]byte, 8)
 	binary.BigEndian.PutUint16(l4[0:2], sport)

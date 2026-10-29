@@ -236,4 +236,34 @@ var _ = Describe("snat_egress", func() {
 				NotTo(Succeed(), "no snat entry should have been allocated for an unsolicited reply")
 		})
 	})
+
+	Context("malformed IP header (ihl < 5) on egress", func() {
+		It("is dropped rather than parsed at a bogus offset", func() {
+			podIP := net.ParseIP("10.0.0.7")
+			serverIP := net.ParseIP("93.184.216.40")
+
+			p.addTargetCIDR(serverIP)
+
+			in := buildTCPWithIHL(podIP, serverIP, 53421, 80, tcpSYN, 4, 0)
+			out := make([]byte, len(in))
+			ret, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcDrop), "ihl < 5 is not a valid IP header")
+		})
+	})
+
+	Context("non-first IP fragment on egress", func() {
+		It("is dropped rather than its payload bytes read as a port", func() {
+			podIP := net.ParseIP("10.0.0.8")
+			serverIP := net.ParseIP("93.184.216.41")
+
+			p.addTargetCIDR(serverIP)
+
+			in := buildTCPWithIHL(podIP, serverIP, 53421, 80, tcpSYN, 5, 185)
+			out := make([]byte, len(in))
+			ret, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ret).To(Equal(tcDrop), "a non-first fragment has no real L4 header to parse")
+		})
+	})
 })

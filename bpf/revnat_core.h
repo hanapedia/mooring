@@ -164,15 +164,21 @@ do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
  *           bpf/headers/revnat_maps.h for dst_kind's lifecycle.
  * - hit  -> is src in target_cidrs? A secondary filter, now worth paying
  *           for (an LPM walk) only because dst already matched one of our
- *           own IPs: it catches traffic that guessed/spoofed a live
- *           ext-IP+port or local pod IP but isn't actually coming from a
- *           server this pod talks to, before it can reach port_range_lookup
- *           or trigger a cross-node ctx_redirect_transit attempt. It is
- *           *not* a correctness boundary either way -- lookup_revnat_entry's
+ *           own IPs: it catches traffic sent to a live ext-IP+port or
+ *           local pod IP that isn't actually coming from a server this pod
+ *           talks to, before it can reach port_range_lookup or trigger a
+ *           cross-node ctx_redirect_transit attempt. It is *not* a
+ *           correctness boundary either way -- lookup_revnat_entry's
  *           nat_map lookup, keyed on the exact src IP+port, is the real
- *           authority in both branches below; this just keeps unauthenticated
- *           noise from reaching that far.
+ *           authority in both branches below; this just keeps unrelated
+ *           traffic from reaching that far.
  * - no   -> CTX_PASS
+ * - a malformed IP header (ihl < 5) or a non-first fragment (no L4 header
+ *   to read at all) is dropped here too, before any L4 parsing assumes a
+ *   trustworthy offset -- see ip_header_unparseable in l4.h. IP options
+ *   (ihl > 5) are not rejected; ip_hdr_len's offset accounts for them, so
+ *   a packet carrying them is parsed correctly rather than needing to be
+ *   rejected outright.
  * - a TCP SYN without ACK is dropped unconditionally here, before the
  *   EXT_IP/POD_IP branch: mooring is egress-only, so a legitimate ingress
  *   packet is always a reply, and a reply never starts with a bare SYN
@@ -228,8 +234,11 @@ static __always_inline int revnat_core(__ctx_buff *ctx) {
   if (proto != IPPROTO_TCP && proto != IPPROTO_UDP && proto != IPPROTO_ICMP)
     return CTX_PASS;
 
+  if (ip_header_unparseable(iph))
+    return CTX_DROP;
+
   __be16 nat_port, server_port;
-  __u32 l4_off = sizeof(struct ethhdr) + sizeof(struct iphdr);
+  __u32 l4_off = sizeof(struct ethhdr) + ip_hdr_len(iph);
   __u32 csum_off;
   __u8 tcp_syn, tcp_fin, tcp_rst, tcp_ack;
 
