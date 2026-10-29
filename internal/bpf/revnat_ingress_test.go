@@ -215,10 +215,9 @@ var _ = Describe("revnat_ingress", func() {
 			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
 			Expect(snatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
 
-			// A second FIN from the SAME direction (e.g. a spoofed repeat,
-			// or a retransmit) must NOT delete anything -- only a FIN from
-			// the pod's own side can confirm the close. This is exactly
-			// what stops a one-directional off-path spoofer.
+			// A second FIN from the SAME direction (e.g. a retransmit) must
+			// NOT delete anything -- only a FIN from the pod's own side can
+			// confirm the close.
 			runIngress(tcpFIN | tcpACK)
 
 			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
@@ -258,10 +257,10 @@ var _ = Describe("revnat_ingress", func() {
 			Expect(p.snat.NatMap.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
 				To(Succeed(), "seed revnat entry")
 
-			// A spoofed RST from the server side marks the revnat entry
-			// closing. The paired snat entry is untouched -- closing_ns is
-			// never mirrored onto the peer, only ever set from genuine
-			// traffic in that entry's own direction.
+			// An RST from the server side marks the revnat entry closing.
+			// The paired snat entry is untouched -- closing_ns is never
+			// mirrored onto the peer, only ever set from traffic in that
+			// entry's own direction.
 			rst := buildTCP(serverIP, podIP, serverPort, natPort, tcpRST)
 			_, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: rst, DataOut: make([]byte, len(rst))})
 			Expect(err).NotTo(HaveOccurred())

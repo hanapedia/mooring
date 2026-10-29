@@ -37,20 +37,19 @@ struct l4_raw {
 // reasons: ihl < 5 is a malformed header (shorter than the IPv4 minimum,
 // so even the base IP fields can't be trusted); a non-first fragment
 // (frag_off's MF bit or a nonzero offset) carries no L4 header at all --
-// it's a raw continuation of the original datagram's payload, so reading
-// anything at the assumed L4 offset would read attacker-controlled
-// payload bytes as if they were ports/flags. ihl > 5 (IP options) is
-// deliberately *not* rejected here -- see ip_hdr_len below, which is what
-// lets a packet with options still be parsed correctly instead of needing
-// to reject it.
+// it's a raw continuation of the original datagram's payload, so there's
+// nothing meaningful to read at the assumed L4 offset. ihl > 5 (IP
+// options) is deliberately *not* rejected here -- see ip_hdr_len below,
+// which is what lets a packet with options still be parsed correctly
+// instead of needing to reject it.
 static __always_inline int ip_header_unparseable(struct iphdr *iph) {
   return iph->ihl < 5 ||
          (bpf_ntohs(iph->frag_off) & (IP_MF | IP_OFFSET)) != 0;
 }
 
 // Byte length of iph's header including options, for callers that have
-// already rejected ip_header_unparseable(iph) -- ihl is otherwise
-// untrusted input (attacker-controlled on any packet they send).
+// already rejected ip_header_unparseable(iph) -- ihl must be validated
+// first, since it comes straight from the packet.
 static __always_inline __u32 ip_hdr_len(struct iphdr *iph) {
   return iph->ihl * 4;
 }

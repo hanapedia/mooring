@@ -246,17 +246,14 @@ func buildTCP(src, dst net.IP, sport, dport uint16, flags uint8) []byte {
 // words, 4-15): ihl==5 is the normal no-options case; ihl>5 zero-fills
 // that many extra option words between the IP and TCP headers (mirroring
 // e.g. Cilium's DSR "opt" dispatch, which adds a real IP option without
-// otherwise changing the packet); ihl<5 is a malformed header a real IP
-// stack would never produce. The physical byte layout always keeps the
-// fixed IP fields (saddr/daddr/etc.) at their normal 20-byte positions --
-// an ihl<5 claim is about the *field value* mooring must reject before
-// trusting it for any offset math, not about actually shrinking the
-// header on the wire (an attacker gains nothing by doing that; the fixed
-// fields still need to be there for the packet to route at all). frag_off
-// is set directly (host-order IP_MF/IP_OFFSET bits already applied by the
-// caller), for building fragment test packets. The IP header checksum is
-// always recomputed over the actual physical header bytes, options
-// included.
+// otherwise changing the packet); ihl<5 is a malformed header. The
+// physical byte layout always keeps the fixed IP fields (saddr/daddr/etc.)
+// at their normal 20-byte positions, regardless of the ihl value under
+// test -- those fields still need to be there for mooring's own fixed
+// struct iphdr overlay to read them correctly. frag_off is set directly
+// (host-order IP_MF/IP_OFFSET bits already applied by the caller), for
+// building fragment test packets. The IP header checksum is always
+// recomputed over the actual physical header bytes, options included.
 func buildTCPWithIHL(src, dst net.IP, sport, dport uint16, flags uint8, ihl int, fragOff uint16) []byte {
 	l4 := make([]byte, 20)
 	binary.BigEndian.PutUint16(l4[0:2], sport)

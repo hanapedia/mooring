@@ -164,14 +164,14 @@ do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
  *           bpf/headers/revnat_maps.h for dst_kind's lifecycle.
  * - hit  -> is src in target_cidrs? A secondary filter, now worth paying
  *           for (an LPM walk) only because dst already matched one of our
- *           own IPs: it catches traffic that guessed/spoofed a live
- *           ext-IP+port or local pod IP but isn't actually coming from a
- *           server this pod talks to, before it can reach port_range_lookup
- *           or trigger a cross-node ctx_redirect_transit attempt. It is
- *           *not* a correctness boundary either way -- lookup_revnat_entry's
+ *           own IPs: it catches traffic sent to a live ext-IP+port or
+ *           local pod IP that isn't actually coming from a server this pod
+ *           talks to, before it can reach port_range_lookup or trigger a
+ *           cross-node ctx_redirect_transit attempt. It is *not* a
+ *           correctness boundary either way -- lookup_revnat_entry's
  *           nat_map lookup, keyed on the exact src IP+port, is the real
- *           authority in both branches below; this just keeps unauthenticated
- *           noise from reaching that far.
+ *           authority in both branches below; this just keeps unrelated
+ *           traffic from reaching that far.
  * - no   -> CTX_PASS
  * - a malformed IP header (ihl < 5) or a non-first fragment (no L4 header
  *   to read at all) is dropped here too, before any L4 parsing assumes a
