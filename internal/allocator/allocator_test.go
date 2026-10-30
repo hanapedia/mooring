@@ -257,6 +257,115 @@ func TestDuplicateIPRejected(t *testing.T) {
 	}
 }
 
+// TestReservedPortBlockNeverAllocated verifies that a reserved port's block
+// is never handed out, across repeated allocation attempts.
+func TestReservedPortBlockNeverAllocated(t *testing.T) {
+	ip := "192.0.2.1"
+	a, err := allocator.New(100, 1024, 1323, "test", nil) // 3 blocks: [1024,1123] [1124,1223] [1224,1323]
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.EnsureIP(ip)
+	a.SetReservedPorts([]uint16{1024}) // reserves block 0 ([1024,1123])
+
+	for i := 0; i < 2; i++ {
+		allocs, err := a.AllocateForPod([]string{ip}, 1)
+		if err != nil {
+			t.Fatalf("allocation %d: %v", i, err)
+		}
+		if al := allocs[ip][0]; al.PortStart == 1024 {
+			t.Errorf("allocation %d returned reserved block [1024,1123]", i)
+		}
+	}
+}
+
+// TestReservedPortAppliesToNewlyRegisteredIP verifies that a reservation set
+// before EnsureIP is still honored for an IP registered afterward.
+func TestReservedPortAppliesToNewlyRegisteredIP(t *testing.T) {
+	a, err := allocator.New(100, 1024, 1323, "test", nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.SetReservedPorts([]uint16{1024})
+
+	ip := "192.0.2.1"
+	a.EnsureIP(ip) // registered after the reservation
+
+	for i := 0; i < 2; i++ {
+		allocs, err := a.AllocateForPod([]string{ip}, 1)
+		if err != nil {
+			t.Fatalf("allocation %d: %v", i, err)
+		}
+		if al := allocs[ip][0]; al.PortStart == 1024 {
+			t.Errorf("allocation %d returned reserved block [1024,1123]", i)
+		}
+	}
+}
+
+// TestReservedPortDoesNotRevokeExistingAllocation verifies that reserving a
+// port already allocated to a pod does not revoke it, but the block is
+// withheld from the free set once it's later freed.
+func TestReservedPortDoesNotRevokeExistingAllocation(t *testing.T) {
+	ip := "192.0.2.1"
+	a := newTestAllocator(t, ip)
+
+	allocs, err := a.AllocateForPod([]string{ip}, 1)
+	if err != nil {
+		t.Fatalf("AllocateForPod: %v", err)
+	}
+	portStart := allocs[ip][0].PortStart
+
+	// Reserve the port the already-allocated block covers -- this must not
+	// panic or error; the block simply isn't in any free set to remove.
+	a.SetReservedPorts([]uint16{portStart})
+
+	before, _ := a.FreeCount(ip)
+	if err := a.Free(map[string][]allocator.Allocation{ip: {{PortStart: portStart, PortEnd: portStart + blockSize - 1}}}); err != nil {
+		t.Fatalf("Free: %v", err)
+	}
+	after, _ := a.FreeCount(ip)
+	if after != before {
+		t.Errorf("FreeCount changed after freeing a now-reserved block: before=%d after=%d (should stay withheld)", before, after)
+	}
+}
+
+// TestRemovingReservationMakesBlockAllocatableAgain verifies that calling
+// SetReservedPorts again without a previously-reserved port un-reserves it.
+func TestRemovingReservationMakesBlockAllocatableAgain(t *testing.T) {
+	ip := "192.0.2.1"
+	a, err := allocator.New(100, 1024, 1123, "test", nil) // exactly 1 block: [1024,1123]
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.SetReservedPorts([]uint16{1024})
+	a.EnsureIP(ip)
+
+	if _, err := a.AllocateForPod([]string{ip}, 1); err == nil {
+		t.Fatal("expected allocation to fail: the only block is reserved")
+	}
+
+	a.SetReservedPorts(nil) // un-reserve
+
+	if _, err := a.AllocateForPod([]string{ip}, 1); err != nil {
+		t.Fatalf("expected allocation to succeed after un-reserving: %v", err)
+	}
+}
+
+// TestReservedPortOutOfRangeIgnored verifies that reserving a port outside
+// the allocator's port space is a no-op, not an error.
+func TestReservedPortOutOfRangeIgnored(t *testing.T) {
+	ip := "192.0.2.1"
+	a := newTestAllocator(t, ip)
+	before, _ := a.FreeCount(ip)
+
+	a.SetReservedPorts([]uint16{1, 65535}) // both outside [minPort, minPort+totalBlocks*blockSize)
+
+	after, _ := a.FreeCount(ip)
+	if after != before {
+		t.Errorf("FreeCount changed from an out-of-range reservation: before=%d after=%d", before, after)
+	}
+}
+
 // TestPortRangeCount verifies that portRangeCount > 1 returns multiple
 // non-overlapping ranges per IP.
 func TestPortRangeCount(t *testing.T) {

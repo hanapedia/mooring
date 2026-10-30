@@ -46,7 +46,7 @@ func (r *NATConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	metrics.NATConfigInfo.WithLabelValues(nc.Name, strconv.Itoa(int(nc.Spec.PortRangeSize))).Set(1)
 
-	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize))
+	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize), toUint16Ports(nc.Spec.ReservedPorts))
 	if err != nil {
 		return ctrl.Result{}, err
 	}

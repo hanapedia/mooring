@@ -42,6 +42,7 @@ type BlockAllocator struct {
 	// due to pool exhaustion (used to drive the port-allocation-failure metric).
 	onExhausted func()
 	ips         map[string]map[uint16]struct{} // extIP → free block index set
+	reserved    map[uint16]struct{}            // block indices excluded at pick time (see SetReservedPorts)
 }
 
 // New creates a BlockAllocator with the given fixed block size and port bounds,
@@ -71,7 +72,38 @@ func New(blockSize, minPort, maxPort uint16, natConfigName string, onExhausted f
 		natConfigName: natConfigName,
 		onExhausted:   onExhausted,
 		ips:           make(map[string]map[uint16]struct{}),
+		reserved:      make(map[uint16]struct{}),
 	}, nil
+}
+
+// SetReservedPorts replaces the set of reserved ports. A reserved port's
+// containing block is excluded at allocation time (AllocateForPod,
+// AllocateForIP), the same way a pod's own already-used blocks on other
+// IPs are -- it is never removed from any IP's free set directly. That's
+// what makes toggling a reservation safe in either direction: a block
+// that's reserved but still genuinely held by a pod simply isn't in the
+// free set yet regardless (nothing to revoke); a block that was only
+// unavailable *because* it was reserved becomes allocatable again the
+// moment it's dropped from this list, with no special-case restore logic
+// needed. Ports outside this allocator's port space are ignored. Unlike
+// blockSize/minPort/maxPort, this is meant to be called on every
+// reconcile of a NATConfig that already has an allocator -- it is not
+// frozen at allocator-creation time.
+func (a *BlockAllocator) SetReservedPorts(ports []uint16) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	reserved := make(map[uint16]struct{}, len(ports))
+	for _, port := range ports {
+		if port < a.minPort {
+			continue
+		}
+		idx := (port - a.minPort) / a.blockSize
+		if idx >= a.totalBlocks {
+			continue
+		}
+		reserved[idx] = struct{}{}
+	}
+	a.reserved = reserved
 }
 
 // EnsureIP registers an external IP with a full free set. No-op if already present.
@@ -129,8 +161,12 @@ func (a *BlockAllocator) AllocateForPod(extIPs []string, portRangeCount uint16) 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// podUsed tracks block indices already assigned to this pod on earlier IPs.
-	podUsed := make(map[uint16]struct{})
+	// podUsed tracks block indices already assigned to this pod on earlier IPs,
+	// seeded with reserved indices so they're excluded on every IP too.
+	podUsed := make(map[uint16]struct{}, len(a.reserved))
+	for idx := range a.reserved {
+		podUsed[idx] = struct{}{}
+	}
 	result := make(map[string][]Allocation, len(extIPs))
 	// rolledBack holds chosen indices per IP so we can restore on failure.
 	rolledBack := make(map[string][]uint16, len(extIPs))
@@ -215,12 +251,15 @@ func (a *BlockAllocator) AllocateForIP(extIP string, portRangeCount uint16, exis
 		return nil, fmt.Errorf("external IP %s not registered", extIP)
 	}
 
-	exclude := make(map[uint16]struct{}, len(existingPortStarts))
+	exclude := make(map[uint16]struct{}, len(existingPortStarts)+len(a.reserved))
 	for _, ps := range existingPortStarts {
 		idx, err := a.blockIndexOf(ps)
 		if err != nil {
 			return nil, fmt.Errorf("existing portStart %d: %w", ps, err)
 		}
+		exclude[idx] = struct{}{}
+	}
+	for idx := range a.reserved {
 		exclude[idx] = struct{}{}
 	}
 
@@ -254,12 +293,22 @@ func (a *BlockAllocator) ListIPs() []string {
 	return ips
 }
 
-// FreeCount returns the number of available blocks for extIP.
+// FreeCount returns the number of allocatable blocks for extIP, excluding
+// reserved ones even if they happen to still sit in the raw free set.
 func (a *BlockAllocator) FreeCount(extIP string) (uint16, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	free, ok := a.ips[extIP]
-	return uint16(len(free)), ok
+	if !ok {
+		return 0, false
+	}
+	count := uint16(0)
+	for idx := range free {
+		if _, reserved := a.reserved[idx]; !reserved {
+			count++
+		}
+	}
+	return count, true
 }
 
 // TotalBlocks returns the total number of blocks per external IP (free + in-use).
@@ -293,6 +342,8 @@ func (a *BlockAllocator) blockIndexOf(portStart uint16) (uint16, error) {
 }
 
 // fullFreeSet returns a map containing all block indices [0, totalBlocks).
+// Reserved indices (see SetReservedPorts) are excluded at pick time instead,
+// not here. Caller must hold mu.
 func (a *BlockAllocator) fullFreeSet() map[uint16]struct{} {
 	s := make(map[uint16]struct{}, a.totalBlocks)
 	for i := uint16(0); i < a.totalBlocks; i++ {

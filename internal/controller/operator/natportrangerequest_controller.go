@@ -52,7 +52,7 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
-	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize))
+	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize), toUint16Ports(nc.Spec.ReservedPorts))
 	if err != nil {
 		return ctrl.Result{}, err
 	}

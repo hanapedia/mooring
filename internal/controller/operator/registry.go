@@ -29,11 +29,14 @@ func NewAllocatorRegistry() *AllocatorRegistry {
 //
 // If an allocator already exists, blockSize is ignored — changing NATConfig.Spec.PortRangeSize
 // on a live NATConfig is not supported and requires a full delete+recreate of the NATConfig
-// and all its NATPortRanges.
-func (r *AllocatorRegistry) EnsureAllocator(natConfigName string, blockSize uint16) (*allocator.BlockAllocator, error) {
+// and all its NATPortRanges. reservedPorts, unlike blockSize, is applied on every call
+// (via BlockAllocator.SetReservedPorts) regardless of whether the allocator already existed,
+// so changes to NATConfig.Spec.ReservedPorts take effect without recreating anything.
+func (r *AllocatorRegistry) EnsureAllocator(natConfigName string, blockSize uint16, reservedPorts []uint16) (*allocator.BlockAllocator, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if a, ok := r.allocators[natConfigName]; ok {
+		a.SetReservedPorts(reservedPorts)
 		return a, nil
 	}
 	a, err := allocator.New(blockSize, allocator.MinPort, allocator.MaxPort, natConfigName,
@@ -41,6 +44,7 @@ func (r *AllocatorRegistry) EnsureAllocator(natConfigName string, blockSize uint
 	if err != nil {
 		return nil, fmt.Errorf("create allocator for NATConfig %s: %w", natConfigName, err)
 	}
+	a.SetReservedPorts(reservedPorts)
 	r.allocators[natConfigName] = a
 	return a, nil
 }

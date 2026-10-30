@@ -81,7 +81,7 @@ spec:
               targetCIDRs:
                 description: |-
                   TargetCIDRs mirrors NATConfig.Spec.TargetCIDRs so the daemon sync
-                  controller can key snat_config entries by (podIP, targetCIDR) without
+                  controller can key nat_config entries by (podIP, targetCIDR) without
                   fetching the NATConfig on every reconcile.
                 items:
                   type: string

@@ -75,6 +75,16 @@ func collectPortStarts(allocs []v1alpha1.PortAllocation) []uint16 {
 	return out
 }
 
+// toUint16Ports converts NATConfigSpec.ReservedPorts ([]int32, the CRD's
+// type) to []uint16, for allocator.BlockAllocator.SetReservedPorts.
+func toUint16Ports(ports []int32) []uint16 {
+	out := make([]uint16, len(ports))
+	for i, p := range ports {
+		out[i] = uint16(p)
+	}
+	return out
+}
+
 // buildPortAllocations converts AllocateForPod output into a PortAllocation slice.
 func buildPortAllocations(allocations map[string][]allocator.Allocation) []v1alpha1.PortAllocation {
 	var result []v1alpha1.PortAllocation
