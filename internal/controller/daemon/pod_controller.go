@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
@@ -14,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -21,6 +23,39 @@ import (
 // Convention: {podNamespace}-{podName}-{natConfigName}
 func nprrName(podNamespace, podName, natConfig string) string {
 	return podNamespace + "-" + podName + "-" + natConfig
+}
+
+// portRangeCountAnnotation lets a pod request more than one NAT port block
+// per external IP (NATPortRangeRequestSpec.PortRangeCount). Honored
+// unconditionally -- any policy restricting who may set it is a cluster
+// concern (RBAC, admission control), not mooring's.
+const portRangeCountAnnotation = "mooring.hanapedia.link/port-range-count"
+
+// desiredPortRangeCount reads portRangeCountAnnotation off pod. Returns nil
+// (defer to NATPortRangeRequestSpec's own default) if the annotation is
+// absent, not a valid integer, or not positive.
+func desiredPortRangeCount(ctx context.Context, pod *corev1.Pod) *int32 {
+	raw, ok := pod.Annotations[portRangeCountAnnotation]
+	if !ok {
+		return nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || n <= 0 {
+		log.FromContext(ctx).WithName("pod").
+			Info("ignoring invalid port-range-count annotation", "pod", pod.Namespace+"/"+pod.Name, "value", raw)
+		return nil
+	}
+	count := int32(n)
+	return &count
+}
+
+// equalPortRangeCount compares two *int32 by value (nil treated as distinct
+// from any set value, including 0).
+func equalPortRangeCount(a, b *int32) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 type PodReconciler struct {
@@ -80,11 +115,12 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			nprr := &v1alpha1.NATPortRangeRequest{
 				ObjectMeta: metav1.ObjectMeta{Name: nprrName(pod.Namespace, pod.Name, ncName)},
 				Spec: v1alpha1.NATPortRangeRequestSpec{
-					PodName:      pod.Name,
-					PodNamespace: pod.Namespace,
-					PodIP:        pod.Status.PodIP,
-					NodeName:     pod.Spec.NodeName,
-					NATConfig:    ncName,
+					PodName:        pod.Name,
+					PodNamespace:   pod.Namespace,
+					PodIP:          pod.Status.PodIP,
+					NodeName:       pod.Spec.NodeName,
+					NATConfig:      ncName,
+					PortRangeCount: desiredPortRangeCount(ctx, &pod),
 				},
 			}
 			if err := r.Create(ctx, nprr); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -108,12 +144,21 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					return ctrl.Result{}, err
 				}
 			}
-		} else if nprr.Status.DeletionGracePeriodExpiry != nil {
-			// Pod running and NATConfig still matches; clear any stale grace period
-			// left over from a previous termination that was superseded by a restart.
-			nprr.Status.DeletionGracePeriodExpiry = nil
-			if err := r.Status().Update(ctx, nprr); err != nil && !apierrors.IsConflict(err) {
-				return ctrl.Result{}, err
+		} else {
+			if nprr.Status.DeletionGracePeriodExpiry != nil {
+				// Pod running and NATConfig still matches; clear any stale grace
+				// period left over from a previous termination that was
+				// superseded by a restart.
+				nprr.Status.DeletionGracePeriodExpiry = nil
+				if err := r.Status().Update(ctx, nprr); err != nil && !apierrors.IsConflict(err) {
+					return ctrl.Result{}, err
+				}
+			}
+			if desired := desiredPortRangeCount(ctx, &pod); !equalPortRangeCount(desired, nprr.Spec.PortRangeCount) {
+				nprr.Spec.PortRangeCount = desired
+				if err := r.Update(ctx, nprr); err != nil && !apierrors.IsConflict(err) {
+					return ctrl.Result{}, err
+				}
 			}
 		}
 	}
