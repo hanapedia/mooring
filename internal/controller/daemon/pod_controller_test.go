@@ -54,6 +54,95 @@ var _ = Describe("Pod controller", func() {
 		})
 	})
 
+	Describe("port-range-count annotation", func() {
+		It("sets PortRangeCount from the annotation on NPRR creation", func() {
+			ncName := uniqueName("nc")
+			nc := makeNATConfig(ncName, []string{"10.17.0.0/24"}, []string{"203.0.113.24/30"},
+				metav1.LabelSelector{MatchLabels: map[string]string{"app": ncName}})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			podName := uniqueName("pod")
+			pod := makePod(podName, "default", map[string]string{"app": ncName})
+			pod.Annotations = map[string]string{"mooring.hanapedia.link/port-range-count": "4"}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			setPodIP(pod, "10.244.1.70")
+
+			nprrN := "default-" + podName + "-" + ncName
+			eventually(func() bool { return nprrExists(nprrN) })
+
+			nprr := getNPRR(nprrN)
+			Expect(nprr.Spec.PortRangeCount).NotTo(BeNil())
+			Expect(*nprr.Spec.PortRangeCount).To(Equal(int32(4)))
+		})
+
+		It("leaves PortRangeCount nil when the annotation is absent", func() {
+			ncName := uniqueName("nc")
+			nc := makeNATConfig(ncName, []string{"10.18.0.0/24"}, []string{"203.0.113.28/30"},
+				metav1.LabelSelector{MatchLabels: map[string]string{"app": ncName}})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			podName := uniqueName("pod")
+			pod := makePod(podName, "default", map[string]string{"app": ncName})
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			setPodIP(pod, "10.244.1.71")
+
+			nprrN := "default-" + podName + "-" + ncName
+			eventually(func() bool { return nprrExists(nprrN) })
+
+			nprr := getNPRR(nprrN)
+			Expect(nprr.Spec.PortRangeCount).To(BeNil())
+		})
+
+		It("ignores an invalid annotation value", func() {
+			ncName := uniqueName("nc")
+			nc := makeNATConfig(ncName, []string{"10.19.0.0/24"}, []string{"203.0.113.32/30"},
+				metav1.LabelSelector{MatchLabels: map[string]string{"app": ncName}})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			podName := uniqueName("pod")
+			pod := makePod(podName, "default", map[string]string{"app": ncName})
+			pod.Annotations = map[string]string{"mooring.hanapedia.link/port-range-count": "not-a-number"}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			setPodIP(pod, "10.244.1.72")
+
+			nprrN := "default-" + podName + "-" + ncName
+			eventually(func() bool { return nprrExists(nprrN) })
+
+			nprr := getNPRR(nprrN)
+			Expect(nprr.Spec.PortRangeCount).To(BeNil())
+		})
+
+		It("updates an existing NPRR's PortRangeCount when the annotation changes", func() {
+			ncName := uniqueName("nc")
+			nc := makeNATConfig(ncName, []string{"10.20.0.0/24"}, []string{"203.0.113.36/30"},
+				metav1.LabelSelector{MatchLabels: map[string]string{"app": ncName}})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			podName := uniqueName("pod")
+			pod := makePod(podName, "default", map[string]string{"app": ncName})
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			setPodIP(pod, "10.244.1.73")
+
+			nprrN := "default-" + podName + "-" + ncName
+			eventually(func() bool { return nprrExists(nprrN) })
+			Expect(getNPRR(nprrN).Spec.PortRangeCount).To(BeNil())
+
+			Eventually(func() error {
+				var cur corev1.Pod
+				if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: podName}, &cur); err != nil {
+					return err
+				}
+				cur.Annotations = map[string]string{"mooring.hanapedia.link/port-range-count": "3"}
+				return k8sClient.Update(ctx, &cur)
+			}, "5s", "100ms").Should(Succeed())
+
+			eventually(func() bool {
+				nprr := getNPRR(nprrN)
+				return nprr != nil && nprr.Spec.PortRangeCount != nil && *nprr.Spec.PortRangeCount == 3
+			})
+		})
+	})
+
 	Describe("grace period on pod gone", func() {
 		It("sets DeletionGracePeriodExpiry on NPRR when pod is fully deleted", func() {
 			ncName := uniqueName("nc")
