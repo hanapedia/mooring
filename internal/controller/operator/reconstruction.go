@@ -42,7 +42,7 @@ func (r *ReconstructionRunnable) Start(ctx context.Context) error {
 		return fmt.Errorf("list NATConfigs: %w", err)
 	}
 	for _, nc := range configs.Items {
-		alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize))
+		alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize), toUint16Ports(nc.Spec.ReservedPorts))
 		if err != nil {
 			return err
 		}

@@ -38,6 +38,7 @@
               kubectl
               cilium-cli
               hubble
+              kubernetes-controller-tools
 
               # Testing
               setup-envtest

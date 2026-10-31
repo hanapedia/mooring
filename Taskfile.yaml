@@ -84,6 +84,11 @@ tasks:
       - go generate .
       - task: fmt
 
+  manifests:
+    desc: Regenerate CRD manifests from api/ type definitions (requires controller-gen)
+    cmds:
+      - controller-gen crd paths=./api/... output:crd:artifacts:config=manifests/crds
+
   build:
     desc: Build moorctl binary to bin/moorctl
     env:

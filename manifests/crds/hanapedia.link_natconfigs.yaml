@@ -143,6 +143,17 @@ spec:
                   All pods under this NATConfig use the same block size.
                 format: int32
                 type: integer
+              reservedPorts:
+                description: |-
+                  ReservedPorts lists individual ports this NATConfig's allocator must
+                  never hand out. Each listed port's containing block is excluded from
+                  allocation on every external IP in the pool. An already-allocated
+                  block is not revoked by adding its port here; removing a port from
+                  this list makes its block allocatable again.
+                items:
+                  format: int32
+                  type: integer
+                type: array
               targetCIDRs:
                 description: TargetCIDRs lists the destination CIDRs that trigger
                   SNAT.

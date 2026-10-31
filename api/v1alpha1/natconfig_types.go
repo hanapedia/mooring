@@ -12,6 +12,13 @@ type NATConfigSpec struct {
 	PortRangeSize int32 `json:"portRangeSize"`
 	// TargetCIDRs lists the destination CIDRs that trigger SNAT.
 	TargetCIDRs []string `json:"targetCIDRs"`
+	// ReservedPorts lists individual ports this NATConfig's allocator must
+	// never hand out. Each listed port's containing block is excluded from
+	// allocation on every external IP in the pool. An already-allocated
+	// block is not revoked by adding its port here; removing a port from
+	// this list makes its block allocatable again.
+	// +optional
+	ReservedPorts []int32 `json:"reservedPorts,omitempty"`
 	// PodSelector selects pods managed by this NATConfig.
 	PodSelector metav1.LabelSelector `json:"podSelector"`
 	// NodeSelector selects nodes that should advertise the return path via BGP.
