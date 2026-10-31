@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const natConfigIndexField = ".spec.natConfig"
@@ -46,7 +47,13 @@ func (r *NATConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	metrics.NATConfigInfo.WithLabelValues(nc.Name, strconv.Itoa(int(nc.Spec.PortRangeSize))).Set(1)
 
-	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize), toUint16Ports(nc.Spec.ReservedPorts))
+	if nc.Spec.AllowRegisteredPorts && len(nc.Spec.ReservedPorts) == 0 {
+		log.FromContext(ctx).WithName("natconfig").Info(
+			"AllowRegisteredPorts is set with no ReservedPorts; allocated ports may collide with this NATConfig's own well-known listeners",
+			"natConfig", nc.Name)
+	}
+
+	alloc, err := r.Registry.EnsureAllocator(nc.Name, uint16(nc.Spec.PortRangeSize), nc.Spec.AllowRegisteredPorts, toUint16Ports(nc.Spec.ReservedPorts))
 	if err != nil {
 		return ctrl.Result{}, err
 	}

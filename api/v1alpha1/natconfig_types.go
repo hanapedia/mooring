@@ -19,6 +19,16 @@ type NATConfigSpec struct {
 	// this list makes its block allocatable again.
 	// +optional
 	ReservedPorts []int32 `json:"reservedPorts,omitempty"`
+	// AllowRegisteredPorts widens this NATConfig's allocator from the
+	// default RFC 6335 dynamic/private range (49152-65535) to the full
+	// 1024-65535 range, including the well-known System and User port
+	// ranges. Only takes effect for an allocator not yet created for this
+	// NATConfig -- like PortRangeSize, it is frozen at allocator-creation
+	// time and changing it requires deleting and recreating the NATConfig.
+	// Combine with ReservedPorts to carve out this NATConfig's own
+	// well-known listener ports before turning this on.
+	// +optional
+	AllowRegisteredPorts bool `json:"allowRegisteredPorts,omitempty"`
 	// PodSelector selects pods managed by this NATConfig.
 	PodSelector metav1.LabelSelector `json:"podSelector"`
 	// NodeSelector selects nodes that should advertise the return path via BGP.

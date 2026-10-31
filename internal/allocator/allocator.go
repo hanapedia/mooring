@@ -6,8 +6,13 @@ import (
 )
 
 const (
-	MinPort = uint16(1024)
-	MaxPort = uint16(65535)
+	// MinPortDynamic is the start of the RFC 6335 dynamic/private range,
+	// the default lower bound for a NATConfig's allocator.
+	MinPortDynamic = uint16(49152)
+	// MinPortFull is the start of the RFC 6335 System range, used instead
+	// of MinPortDynamic when a NATConfig sets AllowRegisteredPorts.
+	MinPortFull = uint16(1024)
+	MaxPort     = uint16(65535)
 )
 
 // Allocation is a single contiguous port range on one external IP.
@@ -60,7 +65,7 @@ func New(blockSize, minPort, maxPort uint16, natConfigName string, onExhausted f
 	// uint16 arithmetic: (maxPort - minPort + 1) wraps to 0 when maxPort=65535 and
 	// minPort=0. That edge case is caught by the totalBlocks==0 check below, but the
 	// error message says "too small" rather than "overflow". Caller should use
-	// MinPort (1024) or higher to stay well clear of the boundary.
+	// MinPortFull (1024) or higher to stay well clear of the boundary.
 	totalBlocks := (maxPort - minPort + 1) / blockSize
 	if totalBlocks == 0 {
 		return nil, fmt.Errorf("port space [%d, %d] too small for blockSize %d", minPort, maxPort, blockSize)

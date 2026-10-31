@@ -16,18 +16,21 @@ var _ = Describe("Metrics", func() {
 		nc := makeNATConfig(uniqueName("nc-metrics"), []string{extIP + "/32"}, blockSize)
 		Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
+		// Default (AllowRegisteredPorts unset) allocator spans the RFC 6335
+		// dynamic/private range only: 16384 ports / 100 per block = 163 blocks,
+		// i.e. 16300 usable ports (the 84-port remainder doesn't form a full block).
 		eventually(func() bool {
-			return testutil.ToFloat64(metrics.NATConfigPortsTotal.WithLabelValues(nc.Name, extIP)) == 64500
+			return testutil.ToFloat64(metrics.NATConfigPortsTotal.WithLabelValues(nc.Name, extIP)) == 16300
 		})
 		eventually(func() bool {
-			return testutil.ToFloat64(metrics.NATConfigPortsFree.WithLabelValues(nc.Name, extIP)) == 64500
+			return testutil.ToFloat64(metrics.NATConfigPortsFree.WithLabelValues(nc.Name, extIP)) == 16300
 		})
 
 		nprr := makeNPRR(uniqueName("nprr-metrics"), nc.Name, ptr32(1))
 		Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
 
 		eventually(func() bool {
-			return testutil.ToFloat64(metrics.NATConfigPortsFree.WithLabelValues(nc.Name, extIP)) == 64400
+			return testutil.ToFloat64(metrics.NATConfigPortsFree.WithLabelValues(nc.Name, extIP)) == 16200
 		})
 	})
 
@@ -101,9 +104,11 @@ var _ = Describe("Metrics", func() {
 	})
 
 	It("increments the port allocation failure counter when a NATConfig's pool is exhausted", func() {
-		// PortRangeSize = the full usable port space, so totalBlocks == 1: the
-		// second pod's allocation is guaranteed to fail.
+		// AllowRegisteredPorts widens the pool to the full 1024-65535 range, and
+		// PortRangeSize = that range's size, so totalBlocks == 1: the second
+		// pod's allocation is guaranteed to fail.
 		nc := makeNATConfig(uniqueName("nc-metrics"), []string{"198.51.100.24/32"}, 64512)
+		nc.Spec.AllowRegisteredPorts = true
 		Expect(k8sClient.Create(ctx, nc)).To(Succeed())
 
 		first := makeNPRR(uniqueName("nprr-metrics"), nc.Name, ptr32(1))
