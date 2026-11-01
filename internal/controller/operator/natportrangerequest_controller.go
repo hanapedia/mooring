@@ -85,7 +85,7 @@ func (r *NATPortRangeRequestReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, nil
 	}
 	if portRangeCount > current {
-		return r.increaseCount(ctx, &npr, alloc, extIPs, portRangeCount-current)
+		return r.increaseCount(ctx, &npr, alloc, extIPs, portRangeCount-current, toUint16Ports(npr.Spec.ExcludePorts))
 	}
 	return r.decreaseCount(ctx, &npr, alloc, extIPs, portRangeCount)
 }
@@ -98,7 +98,7 @@ func (r *NATPortRangeRequestReconciler) createNPR(
 	extIPs []string,
 	portRangeCount uint16,
 ) (ctrl.Result, error) {
-	allocations, err := alloc.AllocateForPod(extIPs, portRangeCount)
+	allocations, err := alloc.AllocateForPod(extIPs, portRangeCount, toUint16Ports(nprr.Spec.ExcludePorts))
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("allocate for pod: %w", err)
 	}
@@ -116,6 +116,7 @@ func (r *NATPortRangeRequestReconciler) createNPR(
 			NATConfig:      nprr.Spec.NATConfig,
 			TargetCIDRs:    nc.Spec.TargetCIDRs,
 			PortRangeCount: int32(portRangeCount),
+			ExcludePorts:   nprr.Spec.ExcludePorts,
 			Allocations:    buildPortAllocations(allocations),
 		},
 	}
@@ -137,13 +138,14 @@ func (r *NATPortRangeRequestReconciler) increaseCount(
 	alloc *allocator.BlockAllocator,
 	extIPs []string,
 	delta uint16,
+	excludePorts []uint16,
 ) (ctrl.Result, error) {
 	existing := collectPortStarts(npr.Spec.Allocations)
 	rollback := make(map[string][]allocator.Allocation)
 	var newAllocs []v1alpha1.PortAllocation
 
 	for _, ip := range extIPs {
-		als, err := alloc.AllocateForIP(ip, delta, existing)
+		als, err := alloc.AllocateForIP(ip, delta, existing, excludePorts)
 		if err != nil {
 			_ = alloc.Free(rollback)
 			return ctrl.Result{}, fmt.Errorf("allocate additional blocks for IP %s: %w", ip, err)

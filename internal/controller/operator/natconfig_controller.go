@@ -149,9 +149,10 @@ func (r *NATConfigReconciler) reconcileNPRAllocations(
 		portRangeCount = defaultPortRangeCount
 	}
 
+	excludePorts := toUint16Ports(npr.Spec.ExcludePorts)
 	rollback := make(map[string][]allocator.Allocation)
 	for _, ip := range toAdd {
-		als, err := alloc.AllocateForIP(ip, portRangeCount, existing)
+		als, err := alloc.AllocateForIP(ip, portRangeCount, existing, excludePorts)
 		if err != nil {
 			_ = alloc.Free(rollback)
 			return fmt.Errorf("allocate for new IP %s on NPR %s: %w", ip, npr.Name, err)

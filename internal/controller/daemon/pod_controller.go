@@ -58,6 +58,21 @@ func equalPortRangeCount(a, b *int32) bool {
 	return *a == *b
 }
 
+// declaredContainerPorts aggregates every ContainerPort declared across all
+// of pod's containers (NATPortRangeRequestSpec.ExcludePorts), so the
+// allocator can avoid handing this pod a NAT block that collides with one of
+// its own declared listeners. Read once at NPRR creation time: pod.Spec is
+// immutable after creation, so this never needs recomputing.
+func declaredContainerPorts(pod *corev1.Pod) []int32 {
+	var ports []int32
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			ports = append(ports, p.ContainerPort)
+		}
+	}
+	return ports
+}
+
 type PodReconciler struct {
 	client.Client
 	NodeName string
@@ -121,6 +136,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					NodeName:       pod.Spec.NodeName,
 					NATConfig:      ncName,
 					PortRangeCount: desiredPortRangeCount(ctx, &pod),
+					ExcludePorts:   declaredContainerPorts(&pod),
 				},
 			}
 			if err := r.Create(ctx, nprr); err != nil && !apierrors.IsAlreadyExists(err) {

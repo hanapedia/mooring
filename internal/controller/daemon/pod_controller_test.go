@@ -143,6 +143,50 @@ var _ = Describe("Pod controller", func() {
 		})
 	})
 
+	Describe("declared container ports", func() {
+		It("sets ExcludePorts from every container's declared ContainerPort", func() {
+			ncName := uniqueName("nc")
+			nc := makeNATConfig(ncName, []string{"10.24.0.0/24"}, []string{"203.0.113.48/30"},
+				metav1.LabelSelector{MatchLabels: map[string]string{"app": ncName}})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			podName := uniqueName("pod")
+			pod := makePod(podName, "default", map[string]string{"app": ncName})
+			pod.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 53}}
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{
+				Name:  "sidecar",
+				Image: "pause",
+				Ports: []corev1.ContainerPort{{ContainerPort: 15090}},
+			})
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			setPodIP(pod, "10.244.1.80")
+
+			nprrN := "default-" + podName + "-" + ncName
+			eventually(func() bool { return nprrExists(nprrN) })
+
+			nprr := getNPRR(nprrN)
+			Expect(nprr.Spec.ExcludePorts).To(ConsistOf(int32(53), int32(15090)))
+		})
+
+		It("leaves ExcludePorts empty when no container declares a port", func() {
+			ncName := uniqueName("nc")
+			nc := makeNATConfig(ncName, []string{"10.25.0.0/24"}, []string{"203.0.113.52/30"},
+				metav1.LabelSelector{MatchLabels: map[string]string{"app": ncName}})
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			podName := uniqueName("pod")
+			pod := makePod(podName, "default", map[string]string{"app": ncName})
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			setPodIP(pod, "10.244.1.81")
+
+			nprrN := "default-" + podName + "-" + ncName
+			eventually(func() bool { return nprrExists(nprrN) })
+
+			nprr := getNPRR(nprrN)
+			Expect(nprr.Spec.ExcludePorts).To(BeEmpty())
+		})
+	})
+
 	Describe("grace period on pod gone", func() {
 		It("sets DeletionGracePeriodExpiry on NPRR when pod is fully deleted", func() {
 			ncName := uniqueName("nc")

@@ -54,6 +54,16 @@ spec:
                   - portStart
                   type: object
                 type: array
+              excludePorts:
+                description: |-
+                  ExcludePorts mirrors NATPortRangeRequest.Spec.ExcludePorts so later
+                  allocations for this pod (e.g. a newly added external IP, or a
+                  PortRangeCount increase) can be excluded from it without looking up
+                  the request.
+                items:
+                  format: int32
+                  type: integer
+                type: array
               natConfig:
                 type: string
               nodeName:

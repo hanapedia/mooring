@@ -197,6 +197,80 @@ var _ = Describe("NATPortRangeRequest controller", func() {
 		})
 	})
 
+	Describe("declared container ports (ExcludePorts)", func() {
+		It("never allocates the block containing an excluded port", func() {
+			nc := makeNATConfig(uniqueName("nc"), []string{"192.0.2.24/32"}, 100)
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			// Default allocator range is 163 blocks (49152-65535 / 100). Request
+			// all but one: if the excluded block (starting at port 49152, the
+			// first block) were still eligible, it would end up allocated.
+			nprr := makeNPRR(uniqueName("nprr"), nc.Name, ptr32(162))
+			nprr.Spec.ExcludePorts = []int32{49152}
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+
+			eventually(func() bool {
+				apr := getNPR(nprr.Name)
+				return apr != nil && apr.Spec.PortRangeCount == 162
+			})
+
+			npr := getNPR(nprr.Name)
+			Expect(npr.Spec.Allocations).To(HaveLen(162))
+			for _, a := range npr.Spec.Allocations {
+				Expect(a.PortStart).NotTo(Equal(int32(49152)))
+			}
+		})
+
+		It("fails the allocation rather than silently ignoring an unsatisfiable exclusion", func() {
+			nc := makeNATConfig(uniqueName("nc"), []string{"192.0.2.28/32"}, 100)
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			// Request every block (163) while excluding one: impossible to satisfy.
+			nprr := makeNPRR(uniqueName("nprr"), nc.Name, ptr32(163))
+			nprr.Spec.ExcludePorts = []int32{49152}
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+
+			Consistently(func() bool { return getNPR(nprr.Name) == nil }, "2s", "200ms").Should(BeTrue())
+		})
+
+		It("still excludes the pod's declared ports when a new external IP is added", func() {
+			// AllowRegisteredPorts + PortRangeSize=32256 gives exactly 2 blocks on
+			// the full 1024-65535 range: [1024,33279] and [33280,65535]. Excluding
+			// port 1024 leaves exactly one allocatable block, so the first IP's
+			// single allocation is deterministically the other one ([33280,65535]).
+			// Extending to a second IP then has nothing left: the cross-IP
+			// non-overlap rule already excludes [33280,65535] (this pod's own
+			// block on the first IP), and ExcludePorts must exclude [1024,33279]
+			// too -- if it didn't, the second IP would wrongly get that block.
+			nc := makeNATConfig(uniqueName("nc"), []string{"192.0.2.32/32"}, 32256)
+			nc.Spec.AllowRegisteredPorts = true
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			nprr := makeNPRR(uniqueName("nprr"), nc.Name, ptr32(1))
+			nprr.Spec.ExcludePorts = []int32{1024}
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+			eventually(func() bool { return getNPR(nprr.Name) != nil })
+			Expect(getNPR(nprr.Name).Spec.Allocations).To(ConsistOf(
+				v1alpha1.PortAllocation{ExternalIP: "192.0.2.32", PortStart: 33280, PortEnd: 65535},
+			))
+
+			// Add a second external IP to the pool.
+			Eventually(func() error {
+				var current v1alpha1.NATConfig
+				if err := k8sClient.Get(ctx, client.ObjectKey{Name: nc.Name}, &current); err != nil {
+					return err
+				}
+				current.Spec.ExternalIPPool = []string{"192.0.2.32/32", "192.0.2.33/32"}
+				return k8sClient.Update(ctx, &current)
+			}, "5s", "100ms").Should(Succeed())
+
+			// No block is left for the new IP: it must not gain an allocation.
+			Consistently(func() int {
+				return len(getNPR(nprr.Name).Spec.Allocations)
+			}, "2s", "200ms").Should(Equal(1))
+		})
+	})
+
 	Describe("two pods, same NATConfig — non-overlapping constraint", func() {
 		It("assigns non-overlapping port ranges across all IPs for two pods", func() {
 			nc := makeNATConfig(uniqueName("nc"), []string{"192.0.2.20/30"}, blockSize)

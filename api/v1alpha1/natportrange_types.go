@@ -22,8 +22,14 @@ type NATPortRangeSpec struct {
 	TargetCIDRs []string `json:"targetCIDRs"`
 	// PortRangeCount mirrors NATPortRangeRequest.Spec.PortRangeCount so the
 	// NATConfig controller can read it without looking up the request.
-	PortRangeCount int32            `json:"portRangeCount"`
-	Allocations    []PortAllocation `json:"allocations"`
+	PortRangeCount int32 `json:"portRangeCount"`
+	// ExcludePorts mirrors NATPortRangeRequest.Spec.ExcludePorts so later
+	// allocations for this pod (e.g. a newly added external IP, or a
+	// PortRangeCount increase) can be excluded from it without looking up
+	// the request.
+	// +optional
+	ExcludePorts []int32          `json:"excludePorts,omitempty"`
+	Allocations  []PortAllocation `json:"allocations"`
 	// StaleSince is set by the operator's NPR controller when the owning NPRR
 	// has been deleted (pod gone and grace period elapsed). All daemons react
 	// by cleaning up their BPF maps. After BPFCleanupWindow has elapsed the
