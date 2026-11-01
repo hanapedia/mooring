@@ -24,22 +24,30 @@ func NewAllocatorRegistry() *AllocatorRegistry {
 }
 
 // EnsureAllocator returns the existing allocator for natConfigName, or creates one
-// with blockSize. The allocator uses [allocator.MinPort, allocator.MaxPort] as its
-// port space. Returns an error only if the port space is invalid for blockSize.
+// with blockSize and a port space starting at allocator.MinPortFull (1024) if
+// allowRegisteredPorts is set, or the narrower allocator.MinPortDynamic (49152)
+// otherwise, up through allocator.MaxPort. Returns an error only if the port
+// space is invalid for blockSize.
 //
-// If an allocator already exists, blockSize is ignored — changing NATConfig.Spec.PortRangeSize
-// on a live NATConfig is not supported and requires a full delete+recreate of the NATConfig
-// and all its NATPortRanges. reservedPorts, unlike blockSize, is applied on every call
-// (via BlockAllocator.SetReservedPorts) regardless of whether the allocator already existed,
-// so changes to NATConfig.Spec.ReservedPorts take effect without recreating anything.
-func (r *AllocatorRegistry) EnsureAllocator(natConfigName string, blockSize uint16, reservedPorts []uint16) (*allocator.BlockAllocator, error) {
+// If an allocator already exists, blockSize and allowRegisteredPorts are both
+// ignored — changing NATConfig.Spec.PortRangeSize or .AllowRegisteredPorts on a
+// live NATConfig is not supported and requires a full delete+recreate of the
+// NATConfig and all its NATPortRanges. reservedPorts, unlike those two, is
+// applied on every call (via BlockAllocator.SetReservedPorts) regardless of
+// whether the allocator already existed, so changes to NATConfig.Spec.ReservedPorts
+// take effect without recreating anything.
+func (r *AllocatorRegistry) EnsureAllocator(natConfigName string, blockSize uint16, allowRegisteredPorts bool, reservedPorts []uint16) (*allocator.BlockAllocator, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if a, ok := r.allocators[natConfigName]; ok {
 		a.SetReservedPorts(reservedPorts)
 		return a, nil
 	}
-	a, err := allocator.New(blockSize, allocator.MinPort, allocator.MaxPort, natConfigName,
+	minPort := allocator.MinPortDynamic
+	if allowRegisteredPorts {
+		minPort = allocator.MinPortFull
+	}
+	a, err := allocator.New(blockSize, minPort, allocator.MaxPort, natConfigName,
 		func() { metrics.NATConfigPortAllocationFailuresTotal.WithLabelValues(natConfigName).Inc() })
 	if err != nil {
 		return nil, fmt.Errorf("create allocator for NATConfig %s: %w", natConfigName, err)

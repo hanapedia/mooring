@@ -212,6 +212,35 @@ var _ = Describe("NATConfig controller", func() {
 		})
 	})
 
+	Describe("AllowRegisteredPorts widens the allocator's port space", func() {
+		It("allows allocations below the RFC 6335 dynamic/private range", func() {
+			nc := makeNATConfig(uniqueName("nc"), []string{"203.0.113.40/32"}, blockSize)
+			nc.Spec.AllowRegisteredPorts = true
+			nc.Spec.ReservedPorts = []int32{1} // avoid the coupling warning in this test
+			Expect(k8sClient.Create(ctx, nc)).To(Succeed())
+
+			// blockSize=100 blocks span the full [1024, 65535] range when the toggle is
+			// on, so a block starting below 49152 (the dynamic/private floor) must be
+			// reachable. Allocate every block and confirm at least one is.
+			nprr := makeNPRR(uniqueName("nprr"), nc.Name, ptr32(645)) // (65535-1024+1)/100, rounded down: every block on the IP
+			Expect(k8sClient.Create(ctx, nprr)).To(Succeed())
+
+			Eventually(func() bool {
+				apr := getNPR(nprr.Name)
+				if apr == nil {
+					return false
+				}
+				for _, a := range apr.Spec.Allocations {
+					if a.PortStart < 49152 {
+						return true
+					}
+				}
+				return false
+			}, "10s", "100ms").Should(BeTrue(),
+				"expected at least one allocation below the dynamic/private range with AllowRegisteredPorts set")
+		})
+	})
+
 	Describe("re-reconcile idempotency", func() {
 		It("does not duplicate allocations when NATConfig is re-reconciled", func() {
 			nc := makeNATConfig(uniqueName("nc"), []string{"203.0.113.36/30"}, blockSize)

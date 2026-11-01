@@ -37,6 +37,17 @@ spec:
             type: object
           spec:
             properties:
+              allowRegisteredPorts:
+                description: |-
+                  AllowRegisteredPorts widens this NATConfig's allocator from the
+                  default RFC 6335 dynamic/private range (49152-65535) to the full
+                  1024-65535 range, including the well-known System and User port
+                  ranges. Only takes effect for an allocator not yet created for this
+                  NATConfig -- like PortRangeSize, it is frozen at allocator-creation
+                  time and changing it requires deleting and recreating the NATConfig.
+                  Combine with ReservedPorts to carve out this NATConfig's own
+                  well-known listener ports before turning this on.
+                type: boolean
               externalIPPool:
                 description: ExternalIPPool is the list of external IP CIDRs available
                   for SNAT.
