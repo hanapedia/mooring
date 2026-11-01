@@ -197,6 +197,31 @@ A pod needing more NAT capacity requests a higher `portRangeCount`; the block si
 per NATConfig and never overridden per-pod. Freed blocks are returned to the per-IP free set as an
 idempotent map insertion (making double-free a safe no-op) and reused on the next allocation.
 
+### Configurable port ranges
+
+Four independent knobs narrow or widen the pool without changing the fixed-block mechanism above.
+`AllocateForPod`/`AllocateForIP` merge `reservedPorts` and `excludePorts` into one exclusion set
+alongside each pick, so a NATConfig's reserved ports and a pod's own declared ports are both
+withheld in the same pass:
+
+- **`NATConfig.allowRegisteredPorts`** (default `false`) selects the allocator's `minPort`: the
+  RFC 6335 dynamic/private range `49152`–`65535` when unset, or the full `1024`–`65535` (including
+  the System and User ranges) when `true`. Fixed at allocator-creation time, like `portRangeSize` —
+  changing it on a live NATConfig requires deleting and recreating it.
+- **`NATConfig.reservedPorts`**: individual ports whose containing block this NATConfig's
+  allocator never hands out, on any external IP. Unlike `allowRegisteredPorts`/`portRangeSize`,
+  applied on every reconcile — adding or removing a reserved port takes effect without recreating
+  anything. Removing a port doesn't revoke a block already allocated under it.
+- **Pod annotation `mooring.hanapedia.link/port-range-count`**: requests more than one block per
+  external IP for that pod, read by the daemon's pod controller into the NPRR's `PortRangeCount`
+  and kept in sync if the annotation value changes later. Honored unconditionally; any gating
+  policy is left to cluster RBAC/admission control, not mooring.
+- **`NATPortRangeRequestSpec.excludePorts`**: that pod's own declared container ports
+  (`ContainerPort` across every container, daemon-populated once at NPRR creation), excluded from
+  that pod's own allocation only — it doesn't shrink the pool for other pods under the same
+  NATConfig. If an exclusion can't be satisfied, the allocation fails rather than landing on one
+  of the pod's own ports anyway.
+
 ---
 
 ## Custom Resources
@@ -218,6 +243,8 @@ spec:
   portRangeSize: 100
   targetCIDRs:
     - "0.0.0.0/0"
+  allowRegisteredPorts: false  # optional; see Configurable port ranges
+  reservedPorts: []            # optional; see Configurable port ranges
   podSelector:
     matchLabels:
       egress: prod
@@ -231,6 +258,8 @@ spec:
 | `externalIPPool` | CIDR blocks providing the external (SNAT) IPs |
 | `portRangeSize` | Fixed number of ports per allocation block; applies uniformly to all pods |
 | `targetCIDRs` | Destination CIDRs for which SNAT is applied |
+| `allowRegisteredPorts` | Optional, default `false`. See [Configurable port ranges](#configurable-port-ranges). |
+| `reservedPorts` | Optional. See [Configurable port ranges](#configurable-port-ranges). |
 | `podSelector` | Selects client pods that this NATConfig applies to |
 | `nodeSelector` | Optional. Selects which nodes advertise pool CIDRs via BGP for the return path. If omitted, all nodes advertise. BPF maps are updated on all nodes regardless of this field. |
 
@@ -262,6 +291,8 @@ spec:
   targetCIDRs:          # copied from NATConfig.spec.targetCIDRs at creation time
     - "0.0.0.0/0"
   portRangeCount: 1     # mirrors the NPRR value; used by NATConfig controller without reading NPRR
+  excludePorts: []      # mirrors the NPRR value; used when allocating for a new external IP
+                        # or a PortRangeCount increase, without reading NPRR
   allocations:
     - externalIP: 203.0.113.1
       portStart: 1300
@@ -296,7 +327,9 @@ spec:
   podIP: 10.0.0.5
   nodeName: node-1
   natConfig: prod
-  portRangeCount: 1   # optional; number of fixed-size blocks per external IP; defaults to 1
+  portRangeCount: 1    # optional; number of fixed-size blocks per external IP; defaults to 1;
+                       # set from the pod's mooring.hanapedia.link/port-range-count annotation
+  excludePorts: [53]   # optional; the pod's own declared ContainerPorts, daemon-populated once
 status:
   deletionGracePeriodExpiry: ""  # set by daemon on pod deletion; request held until expiry
 ```
@@ -602,8 +635,9 @@ mutates NATPortRangeRequest — the daemon owns its lifecycle.
 A `ReconstructionRunnable` runs once immediately after the cache syncs, before any reconciler
 processes a single item:
 
-1. Lists all NATConfigs → creates a `BlockAllocator` per NATConfig (keyed by `portRangeSize`) →
-   calls `EnsureIP` for every IP in each pool.
+1. Lists all NATConfigs → creates a `BlockAllocator` per NATConfig (keyed by `portRangeSize` and
+   `allowRegisteredPorts`, with `reservedPorts` applied via `SetReservedPorts`) → calls `EnsureIP`
+   for every IP in each pool.
 2. Lists all NATPortRanges (skipping those with `DeletionTimestamp`) → calls `MarkUsed` for every
    allocation. Allocations for IPs no longer in the pool are skipped (NATConfig controller will
    clean them up on its next reconcile).
@@ -618,12 +652,13 @@ NATPortRangeRequests that arrived while the operator was down.
 Drives `NATPortRange` toward the desired state derived from NPRR → NATConfig.
 
 - **Create** (no NPR exists): reads the NATConfig, expands `externalIPPool` CIDRs to individual
-  IPs, calls `AllocateForPod(extIPs, portRangeCount)` on the per-NATConfig `BlockAllocator`,
-  creates NPR with all allocations, `portRangeCount` mirrored in spec, owner reference to NPRR,
-  and the allocation finalizer. On Create failure, frees the just-allocated blocks and requeues.
+  IPs, calls `AllocateForPod(extIPs, portRangeCount, excludePorts)` on the per-NATConfig
+  `BlockAllocator` (`excludePorts` from the NPRR's `excludePorts`), creates NPR with all
+  allocations, `portRangeCount` and `excludePorts` mirrored in spec, owner reference to NPRR, and
+  the allocation finalizer. On Create failure, frees the just-allocated blocks and requeues.
 - **Update** (`portRangeCount` changed):
-  - *Increased*: calls `AllocateForIP(ip, delta, existingPortStarts)` for each IP, maintaining
-    the cross-IP exclusion invariant; appends new allocations to NPR and updates.
+  - *Increased*: calls `AllocateForIP(ip, delta, existingPortStarts, excludePorts)` for each IP,
+    maintaining the cross-IP exclusion invariant; appends new allocations to NPR and updates.
   - *Decreased*: for each IP, sorts current allocations by `portStart`, keeps the first M (desired
     count), frees the remainder; updates NPR.
 - **No-op** when NPR exists and `portRangeCount` matches.
@@ -639,14 +674,15 @@ Handles block reclamation when GC marks NPR for deletion.
 
 #### NATConfig controller
 
-Reconciles each NPR's allocations when `externalIPPool` changes. Reads `portRangeCount` directly
-from `NATPortRange.Spec` — never reads NATPortRangeRequest.
+Reconciles each NPR's allocations when `externalIPPool` changes. Reads `portRangeCount` and
+`excludePorts` directly from `NATPortRange.Spec` — never reads NATPortRangeRequest.
 
 - Uses a field index on `.spec.natConfig` to list all NPRs for the changed NATConfig.
 - For each NPR (skipping those with `DeletionTimestamp`):
   - Computes `toAdd` (IPs in desired pool absent from NPR allocations) and `toRemove` (IPs in NPR
     allocations absent from desired pool).
-  - Removes stale allocations, then calls `AllocateForIP(ip, NPR.Spec.PortRangeCount, existingPortStarts)`
+  - Removes stale allocations, then calls
+    `AllocateForIP(ip, NPR.Spec.PortRangeCount, existingPortStarts, NPR.Spec.ExcludePorts)`
     for each new IP, maintaining cross-IP exclusion as new IPs are added in sequence.
   - Updates NPR. On error, requeues (retried with full idempotency next pass).
 - After all NPRs are updated, calls `RemoveIP` on the allocator for each dropped IP.
@@ -691,13 +727,18 @@ Reconcile key: pod namespace/name.
 - **Pod found**: lists all NATConfigs; evaluates each `podSelector` against pod labels to build
   a `matchingNCs` set; lists existing NPRRs for this pod via the `spec.podIdentity` index; then:
   - For each matching NATConfig not already covered by an NPRR: creates a `NATPortRangeRequest`
-    named `{podNamespace}-{podName}-{natConfigName}`.
+    named `{podNamespace}-{podName}-{natConfigName}`, with `PortRangeCount` from the
+    `mooring.hanapedia.link/port-range-count` annotation (nil if absent or invalid) and
+    `ExcludePorts` from every container's declared `ContainerPort` (see
+    [Configurable port ranges](#configurable-port-ranges)).
   - For each existing NPRR whose NATConfig is absent from `matchingNCs` (NATConfig deleted or
     selector narrowed): sets `DeletionGracePeriodExpiry` if not already set.
   - If pod is terminating (`DeletionTimestamp` set): sets `DeletionGracePeriodExpiry` on all
     remaining NPRRs for this pod.
   - If pod is running and an NPRR has a stale `DeletionGracePeriodExpiry` (pod restarted during
-    the grace window): clears the expiry via a status subresource update.
+    the grace window): clears the expiry via a status subresource update. Also re-reads the
+    annotation and updates the NPRR's `PortRangeCount` if it changed — `ExcludePorts` is never
+    recomputed after creation, since `pod.Spec.Containers` is immutable.
 
 #### NATPortRangeRequest controller
 
