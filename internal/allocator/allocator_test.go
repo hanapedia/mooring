@@ -27,7 +27,7 @@ func newTestAllocator(t *testing.T, ips ...string) *allocator.BlockAllocator {
 func TestAllocateBasic(t *testing.T) {
 	a := newTestAllocator(t, "192.0.2.1")
 
-	allocs, err := a.AllocateForPod([]string{"192.0.2.1"}, 1)
+	allocs, err := a.AllocateForPod([]string{"192.0.2.1"}, 1, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestNonOverlappingSamePod(t *testing.T) {
 	ips := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}
 	a := newTestAllocator(t, ips...)
 
-	allocs, err := a.AllocateForPod(ips, 2)
+	allocs, err := a.AllocateForPod(ips, 2, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestSameBlockReusableAcrossPods(t *testing.T) {
 	a := newTestAllocator(t, ip1, ip2)
 
 	// pod-foo gets one block on ip1.
-	fooAllocs, err := a.AllocateForPod([]string{ip1}, 1)
+	fooAllocs, err := a.AllocateForPod([]string{ip1}, 1, nil)
 	if err != nil {
 		t.Fatalf("pod-foo AllocateForPod: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestSameBlockReusableAcrossPods(t *testing.T) {
 
 	// pod-bar gets one block on ip2. It should be able to use the same port
 	// range as pod-foo since they are on different IPs.
-	barAllocs, err := a.AllocateForPod([]string{ip2}, 1)
+	barAllocs, err := a.AllocateForPod([]string{ip2}, 1, nil)
 	if err != nil {
 		t.Fatalf("pod-bar AllocateForPod: %v", err)
 	}
@@ -116,20 +116,20 @@ func TestExhaustion(t *testing.T) {
 	a.EnsureIP(ip)
 
 	for i := 0; i < 3; i++ {
-		if _, err := a.AllocateForPod([]string{ip}, 1); err != nil {
+		if _, err := a.AllocateForPod([]string{ip}, 1, nil); err != nil {
 			t.Fatalf("allocation %d failed: %v", i, err)
 		}
 	}
 	if exhaustedCount != 0 {
 		t.Errorf("onExhausted called %d times before exhaustion, want 0", exhaustedCount)
 	}
-	if _, err := a.AllocateForPod([]string{ip}, 1); err == nil {
+	if _, err := a.AllocateForPod([]string{ip}, 1, nil); err == nil {
 		t.Error("expected error on exhausted pool, got nil")
 	}
 	if exhaustedCount != 1 {
 		t.Errorf("onExhausted called %d times after one failed allocation, want 1", exhaustedCount)
 	}
-	if _, err := a.AllocateForPod([]string{ip}, 1); err == nil {
+	if _, err := a.AllocateForPod([]string{ip}, 1, nil); err == nil {
 		t.Error("expected error on exhausted pool, got nil")
 	}
 	if exhaustedCount != 2 {
@@ -153,14 +153,14 @@ func TestRollbackOnFailure(t *testing.T) {
 	a.EnsureIP(ip2) // 3 free blocks
 
 	// Use up 2 blocks on ip2 so only 1 remains.
-	if _, err := a.AllocateForPod([]string{ip2}, 2); err != nil {
+	if _, err := a.AllocateForPod([]string{ip2}, 2, nil); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
 	before, _ := a.FreeCount(ip1)
 
 	// Request portRangeCount=2: ip1 can satisfy it but ip2 (1 free) cannot.
-	_, err = a.AllocateForPod([]string{ip1, ip2}, 2)
+	_, err = a.AllocateForPod([]string{ip1, ip2}, 2, nil)
 	if err == nil {
 		t.Fatal("expected failure, got nil")
 	}
@@ -176,7 +176,7 @@ func TestFreeAndReallocate(t *testing.T) {
 	ip := "192.0.2.1"
 	a := newTestAllocator(t, ip)
 
-	allocs, err := a.AllocateForPod([]string{ip}, 1)
+	allocs, err := a.AllocateForPod([]string{ip}, 1, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestFreeAndReallocate(t *testing.T) {
 	}
 
 	// Should be able to reallocate — and may get the same block back.
-	if _, err := a.AllocateForPod([]string{ip}, 1); err != nil {
+	if _, err := a.AllocateForPod([]string{ip}, 1, nil); err != nil {
 		t.Fatalf("reallocate after free: %v", err)
 	}
 }
@@ -203,7 +203,7 @@ func TestReconstruction(t *testing.T) {
 		t.Fatalf("MarkUsed: %v", err)
 	}
 
-	allocs, err := a.AllocateForPod([]string{ip}, 1)
+	allocs, err := a.AllocateForPod([]string{ip}, 1, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod after reconstruction: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestDoubleFreeIdempotent(t *testing.T) {
 
 	before, _ := a.FreeCount(ip)
 
-	allocs, err := a.AllocateForPod([]string{ip}, 1)
+	allocs, err := a.AllocateForPod([]string{ip}, 1, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestDuplicateIPRejected(t *testing.T) {
 	a := newTestAllocator(t, ip)
 
 	before, _ := a.FreeCount(ip)
-	_, err := a.AllocateForPod([]string{ip, ip}, 1)
+	_, err := a.AllocateForPod([]string{ip, ip}, 1, nil)
 	if err == nil {
 		t.Fatal("expected error for duplicate IP, got nil")
 	}
@@ -269,7 +269,7 @@ func TestReservedPortBlockNeverAllocated(t *testing.T) {
 	a.SetReservedPorts([]uint16{1024}) // reserves block 0 ([1024,1123])
 
 	for i := 0; i < 2; i++ {
-		allocs, err := a.AllocateForPod([]string{ip}, 1)
+		allocs, err := a.AllocateForPod([]string{ip}, 1, nil)
 		if err != nil {
 			t.Fatalf("allocation %d: %v", i, err)
 		}
@@ -292,7 +292,7 @@ func TestReservedPortAppliesToNewlyRegisteredIP(t *testing.T) {
 	a.EnsureIP(ip) // registered after the reservation
 
 	for i := 0; i < 2; i++ {
-		allocs, err := a.AllocateForPod([]string{ip}, 1)
+		allocs, err := a.AllocateForPod([]string{ip}, 1, nil)
 		if err != nil {
 			t.Fatalf("allocation %d: %v", i, err)
 		}
@@ -309,7 +309,7 @@ func TestReservedPortDoesNotRevokeExistingAllocation(t *testing.T) {
 	ip := "192.0.2.1"
 	a := newTestAllocator(t, ip)
 
-	allocs, err := a.AllocateForPod([]string{ip}, 1)
+	allocs, err := a.AllocateForPod([]string{ip}, 1, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod: %v", err)
 	}
@@ -340,13 +340,13 @@ func TestRemovingReservationMakesBlockAllocatableAgain(t *testing.T) {
 	a.SetReservedPorts([]uint16{1024})
 	a.EnsureIP(ip)
 
-	if _, err := a.AllocateForPod([]string{ip}, 1); err == nil {
+	if _, err := a.AllocateForPod([]string{ip}, 1, nil); err == nil {
 		t.Fatal("expected allocation to fail: the only block is reserved")
 	}
 
 	a.SetReservedPorts(nil) // un-reserve
 
-	if _, err := a.AllocateForPod([]string{ip}, 1); err != nil {
+	if _, err := a.AllocateForPod([]string{ip}, 1, nil); err != nil {
 		t.Fatalf("expected allocation to succeed after un-reserving: %v", err)
 	}
 }
@@ -372,7 +372,7 @@ func TestPortRangeCount(t *testing.T) {
 	ip := "192.0.2.1"
 	a := newTestAllocator(t, ip)
 
-	allocs, err := a.AllocateForPod([]string{ip}, 3)
+	allocs, err := a.AllocateForPod([]string{ip}, 3, nil)
 	if err != nil {
 		t.Fatalf("AllocateForPod: %v", err)
 	}
@@ -385,6 +385,84 @@ func TestPortRangeCount(t *testing.T) {
 			if als[i].PortStart <= als[j].PortEnd && als[j].PortStart <= als[i].PortEnd {
 				t.Errorf("overlap between allocation %d and %d", i, j)
 			}
+		}
+	}
+}
+
+// TestExcludePortsForPod verifies that AllocateForPod never returns a block
+// containing an excluded port, even though the port itself need not be
+// block-aligned.
+func TestExcludePortsForPod(t *testing.T) {
+	ip := "192.0.2.1"
+	a, err := allocator.New(100, 1024, 1323, "test", nil) // 3 blocks: [1024,1123] [1124,1223] [1224,1323]
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.EnsureIP(ip)
+
+	// Only 2 of the 3 blocks are eligible once block 0 is excluded; loop that
+	// many times (not 3) so this verifies exclusion, not genuine exhaustion.
+	for i := 0; i < 2; i++ {
+		allocs, err := a.AllocateForPod([]string{ip}, 1, []uint16{1050}) // mid-block, not block-aligned
+		if err != nil {
+			t.Fatalf("allocation %d: %v", i, err)
+		}
+		if al := allocs[ip][0]; al.PortStart == 1024 {
+			t.Errorf("allocation %d returned the block containing excluded port 1050", i)
+		}
+	}
+}
+
+// TestExcludePortsExhaustionFails verifies that AllocateForPod fails rather
+// than silently ignoring the exclusion when it leaves too few free blocks.
+func TestExcludePortsExhaustionFails(t *testing.T) {
+	ip := "192.0.2.1"
+	a, err := allocator.New(100, 1024, 1123, "test", nil) // exactly 1 block: [1024,1123]
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.EnsureIP(ip)
+
+	if _, err := a.AllocateForPod([]string{ip}, 1, []uint16{1024}); err == nil {
+		t.Fatal("expected allocation to fail: the only block contains an excluded port")
+	}
+}
+
+// TestExcludePortsOutOfRangeIgnored verifies that an excluded port outside
+// the allocator's port space is a no-op, not an error.
+func TestExcludePortsOutOfRangeIgnored(t *testing.T) {
+	ip := "192.0.2.1"
+	a := newTestAllocator(t, ip)
+
+	allocs, err := a.AllocateForPod([]string{ip}, 1, []uint16{1, 65535})
+	if err != nil {
+		t.Fatalf("AllocateForPod: %v", err)
+	}
+	if len(allocs[ip]) != 1 {
+		t.Fatalf("expected 1 allocation, got %d", len(allocs[ip]))
+	}
+}
+
+// TestExcludePortsForIP verifies that AllocateForIP, used when extending an
+// existing pod's allocations to a new external IP or a higher PortRangeCount,
+// also respects excludePorts.
+func TestExcludePortsForIP(t *testing.T) {
+	ip := "192.0.2.1"
+	a, err := allocator.New(100, 1024, 1323, "test", nil) // 3 blocks: [1024,1123] [1124,1223] [1224,1323]
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.EnsureIP(ip)
+
+	// Only 2 of the 3 blocks are eligible once block 0 is excluded; loop that
+	// many times (not 3) so this verifies exclusion, not genuine exhaustion.
+	for i := 0; i < 2; i++ {
+		als, err := a.AllocateForIP(ip, 1, nil, []uint16{1050})
+		if err != nil {
+			t.Fatalf("allocation %d: %v", i, err)
+		}
+		if als[0].PortStart == 1024 {
+			t.Errorf("allocation %d returned the block containing excluded port 1050", i)
 		}
 	}
 }

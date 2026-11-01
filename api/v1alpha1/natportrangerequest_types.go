@@ -13,6 +13,13 @@ type NATPortRangeRequestSpec struct {
 	// PortRangeCount is the number of fixed-size blocks to allocate per external IP.
 	// Defaults to 1 if unset.
 	PortRangeCount *int32 `json:"portRangeCount,omitempty"`
+	// ExcludePorts lists this pod's own declared container ports (set once by
+	// the daemon from the pod's spec at NPRR creation time, not operator-authored).
+	// Each listed port's containing block is excluded from this pod's own
+	// allocation only, so a NAT-allocated port can't land on one of the pod's
+	// own listeners.
+	// +optional
+	ExcludePorts []int32 `json:"excludePorts,omitempty"`
 }
 
 type NATPortRangeRequestStatus struct {

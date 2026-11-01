@@ -146,13 +146,47 @@ func (a *BlockAllocator) MarkUsed(extIP string, portStart uint16) error {
 	return nil
 }
 
+// blockIndexContaining returns the block index containing port and true, or
+// false if port falls outside this allocator's port space. Unlike
+// blockIndexOf, port need not be a block boundary -- any port within a
+// block resolves to that block's index. Caller must hold mu.
+func (a *BlockAllocator) blockIndexContaining(port uint16) (uint16, bool) {
+	if port < a.minPort {
+		return 0, false
+	}
+	idx := (port - a.minPort) / a.blockSize
+	if idx >= a.totalBlocks {
+		return 0, false
+	}
+	return idx, true
+}
+
+// excludeSetFor returns the block indices containing ports, merged with the
+// allocator's reserved indices. Ports outside the allocator's port space are
+// ignored. Caller must hold mu.
+func (a *BlockAllocator) excludeSetFor(ports []uint16) map[uint16]struct{} {
+	exclude := make(map[uint16]struct{}, len(ports)+len(a.reserved))
+	for idx := range a.reserved {
+		exclude[idx] = struct{}{}
+	}
+	for _, port := range ports {
+		if idx, ok := a.blockIndexContaining(port); ok {
+			exclude[idx] = struct{}{}
+		}
+	}
+	return exclude
+}
+
 // AllocateForPod allocates portRangeCount blocks per IP across all extIPs.
 // It guarantees that no block index is repeated across IPs for this pod, so
 // the returned port ranges are non-overlapping across all IPs by construction.
+// excludePorts additionally withholds the blocks containing them from this
+// pod's allocation only -- typically the pod's own declared container ports,
+// so a NAT-allocated port can't land on one of its own listeners.
 // On any failure the entire allocation is rolled back atomically.
 // extIPs must not contain duplicates: a repeated IP would cause the first
 // iteration's blocks to be overwritten in rolledBack, leaking them permanently.
-func (a *BlockAllocator) AllocateForPod(extIPs []string, portRangeCount uint16) (map[string][]Allocation, error) {
+func (a *BlockAllocator) AllocateForPod(extIPs []string, portRangeCount uint16, excludePorts []uint16) (map[string][]Allocation, error) {
 	if portRangeCount == 0 {
 		return nil, fmt.Errorf("portRangeCount must be > 0")
 	}
@@ -167,11 +201,8 @@ func (a *BlockAllocator) AllocateForPod(extIPs []string, portRangeCount uint16) 
 	defer a.mu.Unlock()
 
 	// podUsed tracks block indices already assigned to this pod on earlier IPs,
-	// seeded with reserved indices so they're excluded on every IP too.
-	podUsed := make(map[uint16]struct{}, len(a.reserved))
-	for idx := range a.reserved {
-		podUsed[idx] = struct{}{}
-	}
+	// seeded with reserved and excluded indices so they're excluded on every IP too.
+	podUsed := a.excludeSetFor(excludePorts)
 	result := make(map[string][]Allocation, len(extIPs))
 	// rolledBack holds chosen indices per IP so we can restore on failure.
 	rolledBack := make(map[string][]uint16, len(extIPs))
@@ -246,8 +277,10 @@ func (a *BlockAllocator) Free(allocs map[string][]Allocation) error {
 // AllocateForIP allocates portRangeCount blocks on a single extIP, excluding block
 // indices already used by this pod on other external IPs. existingPortStarts contains
 // the PortStart values of the pod's current allocations on those other IPs. This is
-// used when extending an existing pod's allocations to a newly added external IP.
-func (a *BlockAllocator) AllocateForIP(extIP string, portRangeCount uint16, existingPortStarts []uint16) ([]Allocation, error) {
+// used when extending an existing pod's allocations to a newly added external IP, or
+// growing its PortRangeCount. excludePorts additionally withholds the blocks
+// containing them, same as in AllocateForPod.
+func (a *BlockAllocator) AllocateForIP(extIP string, portRangeCount uint16, existingPortStarts []uint16, excludePorts []uint16) ([]Allocation, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -256,15 +289,12 @@ func (a *BlockAllocator) AllocateForIP(extIP string, portRangeCount uint16, exis
 		return nil, fmt.Errorf("external IP %s not registered", extIP)
 	}
 
-	exclude := make(map[uint16]struct{}, len(existingPortStarts)+len(a.reserved))
+	exclude := a.excludeSetFor(excludePorts)
 	for _, ps := range existingPortStarts {
 		idx, err := a.blockIndexOf(ps)
 		if err != nil {
 			return nil, fmt.Errorf("existing portStart %d: %w", ps, err)
 		}
-		exclude[idx] = struct{}{}
-	}
-	for idx := range a.reserved {
 		exclude[idx] = struct{}{}
 	}
 
