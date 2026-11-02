@@ -1,11 +1,12 @@
-//go:build bpftest
-
 // Datapath tests for snat_egress and revnat_ingress load the compiled BPF
 // objects and drive them directly via BPF_PROG_TEST_RUN (cilium/ebpf's
 // Program.Run). Loading BPF programs and maps requires CAP_BPF/CAP_SYS_ADMIN,
-// so these tests are gated behind the "bpftest" build tag and must run as
-// root — see `task test-bpf`. They also require internal/bpf/*_bpfel.o to
-// exist (`task generate`).
+// so these must run as root -- see `task test-bpf`, which also runs
+// `task generate` first to produce the internal/bpf/*_bpfel.o these embed.
+// Not gated behind a build tag: without root, LoadSnatEgressObjects and
+// friends fail with a message that says so directly, so a stray untagged
+// `go test ./...`/`go build ./...` fails clearly rather than silently, and
+// gopls/editors get full coverage of these files without extra config.
 package bpf_test
 
 import (

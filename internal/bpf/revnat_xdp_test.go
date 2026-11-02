@@ -1,5 +1,3 @@
-//go:build bpftest
-
 package bpf_test
 
 import (
