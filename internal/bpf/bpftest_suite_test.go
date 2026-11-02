@@ -72,6 +72,15 @@ func beU16(port uint16) uint16 {
 	return binary.LittleEndian.Uint16(b)
 }
 
+// clampToRange mirrors snat_egress.c's clamp_to_range exactly, so a test can
+// predict which port candidate try_alloc_port will probe first for a given
+// pod_port -- used to deliberately seed a collision on that exact candidate.
+func clampToRange(start, end, val uint16) uint16 {
+	n := uint32(end-start) + 1
+	m := uint32(val) * n
+	return start + uint16(m>>16)
+}
+
 type testPrograms struct {
 	snat   *bpf.SnatEgressObjects
 	revnat *bpf.RevnatIngressObjects

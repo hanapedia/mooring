@@ -63,9 +63,8 @@ struct nat_map_val {
     // with no resumed ordinary traffic since. Set only from traffic
     // actually seen in this entry's own direction -- never mirrored from
     // the peer entry; see nat_map_track_tcp_close for the deletion rule
-    // this enables. Also doubles as the staleness timestamp for the
-    // allocator's lazy reclaim check (snat_egress.c's try_alloc_port) and
-    // for bpf/nat_gc.c's proactive sweep.
+    // this enables. Also doubles as the staleness timestamp bpf/nat_gc.c's
+    // sweep reclaims by.
     __u64 closing_ns;
     // nat_map_any only. 0 = touched since GC's last sweep, 1 = marked
     // stale by GC (bpf/nat_gc.c), due for deletion next sweep unless the
@@ -75,12 +74,10 @@ struct nat_map_val {
   };
 };
 
-// How long a TCP entry marked closing can sit unconfirmed before it may be
-// reclaimed -- either lazily, by a colliding allocation (snat_egress.c's
-// try_alloc_port), or proactively, by the next GC sweep (bpf/nat_gc.c).
-// Covers unclean ends (crash, dropped FIN/RST) that close-tracking never
-// gets to confirm. TCP only -- UDP/ICMP use the `stale` generation marker
-// above instead, with no timestamp.
+// How long a TCP entry marked closing can sit unconfirmed before bpf/nat_gc.c's
+// sweep reclaims it. Covers unclean ends (crash, dropped FIN/RST) that
+// close-tracking never gets to confirm. TCP only -- UDP/ICMP use the
+// `stale` generation marker above instead, with no timestamp.
 #define NAT_CLOSING_STALE_NS (10ULL * 1000000000ULL)
 
 // max_entries = 65536 each, matching this map's share of the old combined

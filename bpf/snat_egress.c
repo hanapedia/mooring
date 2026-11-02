@@ -113,13 +113,16 @@ static __always_inline __u16 clamp_to_range(__u16 start, __u16 end, __u16 val) {
 // derived deterministically from the connection's own pod-side port (no
 // bpf_get_prandom_u32 call, no modulo), then up to MAX_PORT_ATTEMPTS linear
 // steps on collision. A "collision" is an existing revnat entry in nat_map
-// for that exact (server-IP, server-port, pod-IP, candidate-port) tuple.
-// ICMP skips collision checking entirely and always overwrites (echo id
-// collisions are cheap/self-correcting and short-lived). For TCP, a collision
-// against an entry marked closing for longer than NAT_CLOSING_STALE_NS is
-// treated as free and reclaimed (the stale flow's snat entry is deleted too
-// -- its revnat entry gets overwritten naturally once this allocation
-// succeeds and writes to the same key).
+// for that exact (server-IP, server-port, pod-IP, candidate-port) tuple --
+// occupied is occupied, regardless of whether the entry occupying it looks
+// stale: reclaiming a colliding-but-stale entry inline used to happen here,
+// but that raced bpf/nat_gc.c's own proactive sweep (both independently
+// deciding the same entry was reclaimable, one of them then clobbering
+// whatever the other had just written) for no real benefit now that GC
+// actually runs -- a collision here just means "try the next candidate,"
+// and a stale entry gets cleaned up on GC's own schedule instead. ICMP
+// skips collision checking entirely and always overwrites (echo id
+// collisions are cheap/self-correcting and short-lived).
 //
 // seed_offset lets the caller vary the starting point across independent
 // entry-attempts even when a with-replacement resample lands on this same
@@ -140,17 +143,8 @@ static __always_inline int try_alloc_port(struct port_range_alloc *e,
 
   for (__u32 attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt++) {
     __be16 candidate = bpf_htons(port);
-    struct nat_map_val *existing =
-        nat_map_lookup_revnat(server_ip, pod_ip, server_port, candidate, proto);
-    if (!existing) {
-      *out_port = candidate;
-      return 1;
-    }
-    if (proto == IPPROTO_TCP && existing->closing_ns &&
-        bpf_ktime_get_ns() - existing->closing_ns > NAT_CLOSING_STALE_NS) {
-      // existing->port is the stale flow's pod_port
-      nat_map_delete_snat(pod_ip, server_ip, existing->port, server_port,
-                          proto);
+    if (!nat_map_lookup_revnat(server_ip, pod_ip, server_port, candidate,
+                               proto)) {
       *out_port = candidate;
       return 1;
     }

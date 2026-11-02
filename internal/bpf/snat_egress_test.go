@@ -85,6 +85,56 @@ var _ = Describe("snat_egress", func() {
 		})
 	})
 
+	Context("port allocation colliding with a stale entry", func() {
+		It("skips a colliding-but-stale candidate instead of reclaiming it", func() {
+			podIP := net.ParseIP("10.0.0.9")
+			serverIP := net.ParseIP("93.184.216.34")
+			extIP := net.ParseIP("203.0.113.9")
+			const podPort, serverPort uint16 = 20000, 80
+			const portStart, portEnd uint16 = 40000, 40001 // a 2-port range
+
+			p.addTargetCIDR(serverIP)
+
+			key := bpf.SnatEgressNatConfigKey{
+				PodIp:         beU32(podIP),
+				CidrAddr:      beU32(serverIP),
+				CidrPrefixlen: 32,
+			}
+			var val bpf.SnatEgressNatConfigVal
+			val.PortRangeAllocs[0].ExtIp = beU32(extIP)
+			val.PortRangeAllocs[0].PortStart = portStart
+			val.PortRangeAllocs[0].PortEnd = portEnd
+			val.Count = 1
+			Expect(p.snat.NatConfig.Put(key, val)).To(Succeed(), "seed nat_config")
+
+			// try_alloc_port's first candidate for this pod_port, seed_offset
+			// 0 (clamp_to_range's own math, mirrored in Go) -- occupy it with
+			// a long-stale revnat entry, as if an earlier connection from
+			// this same ext port had died without a clean close.
+			firstCandidate := clampToRange(portStart, portEnd, podPort)
+			Expect(firstCandidate).To(Equal(portStart), "test setup: expected pod_port to seed the range's first port")
+
+			staleRevnatKey := natMapKey(serverIP, podIP, serverPort, firstCandidate, protoTCP, natEntryREVNAT)
+			staleVal := bpf.SnatEgressNatMapVal{
+				NatIp: beU32(extIP), Port: beU16(9999), ClosingNs: closingNsLongAgo,
+			}
+			Expect(p.snat.NatMapTcp.Put(staleRevnatKey, staleVal)).To(Succeed(), "seed stale revnat entry")
+
+			in := buildTCP(podIP, serverIP, podPort, serverPort, tcpSYN)
+			out := make([]byte, len(in))
+			_, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: in, DataOut: out})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, l4 := parseEthIPv4(out)
+			Expect(binary.BigEndian.Uint16(l4[0:2])).To(Equal(portEnd),
+				"allocation should have skipped the stale-but-still-occupied first candidate and used the next port")
+
+			var stillThere bpf.SnatEgressNatMapVal
+			Expect(p.snat.NatMapTcp.Lookup(staleRevnatKey, &stillThere)).To(Succeed(), "stale entry should not have been reclaimed inline")
+			Expect(stillThere).To(Equal(staleVal), "stale entry's contents should be untouched -- only bpf/nat_gc.c reclaims it now")
+		})
+	})
+
 	Context("no target_cidrs match", func() {
 		It("passes the packet through unmodified", func() {
 			podIP := net.ParseIP("10.0.0.5")
