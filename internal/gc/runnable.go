@@ -27,6 +27,11 @@ const (
 	// scheduled tick), so this just avoids doing the same work twice back
 	// to back, not a correctness requirement.
 	debounceWindow = time.Second
+
+	// signalRetryDelay is how long watchSignal waits before reopening
+	// nat_map_gc_signal after an unexpected read failure, so a persistent
+	// problem doesn't spin the retry loop.
+	signalRetryDelay = 5 * time.Second
 )
 
 // Runnable periodically sweeps nat_map_tcp and nat_map_any (RunSweep) on a
@@ -50,32 +55,13 @@ func (r *Runnable) Start(ctx context.Context) error {
 		period = DefaultPeriod
 	}
 
-	signalMap, err := ebpf.LoadPinnedMap(filepath.Join(mapsDir, gcSignalMapName), nil)
-	if err != nil {
-		return fmt.Errorf("gc: open %s (is mooring loaded?): %w", gcSignalMapName, err)
+	// Fail fast if mooring isn't loaded yet; watchSignal handles a later
+	// failure differently (retries instead of giving up).
+	if err := probeSignal(); err != nil {
+		return fmt.Errorf("gc: %w", err)
 	}
-	defer signalMap.Close()
 
-	reader, err := ringbuf.NewReader(signalMap)
-	if err != nil {
-		return fmt.Errorf("gc: open ringbuf reader on %s: %w", gcSignalMapName, err)
-	}
-	defer reader.Close() // unblocks the goroutine below's Read() on shutdown
-
-	signals := make(chan struct{})
-	go func() {
-		defer close(signals)
-		for {
-			if _, err := reader.Read(); err != nil {
-				return // reader.Close() (above) or a real read error -- either way, stop
-			}
-			select {
-			case signals <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	signals := watchSignal(ctx)
 
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
@@ -90,6 +76,75 @@ func (r *Runnable) Start(ctx context.Context) error {
 			r.sweepAll()
 		case <-signals:
 			r.sweepAll()
+		}
+	}
+}
+
+func openSignalReader() (*ringbuf.Reader, *ebpf.Map, error) {
+	signalMap, err := ebpf.LoadPinnedMap(filepath.Join(mapsDir, gcSignalMapName), nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open %s (is mooring loaded?): %w", gcSignalMapName, err)
+	}
+	reader, err := ringbuf.NewReader(signalMap)
+	if err != nil {
+		signalMap.Close()
+		return nil, nil, fmt.Errorf("open ringbuf reader on %s: %w", gcSignalMapName, err)
+	}
+	return reader, signalMap, nil
+}
+
+func probeSignal() error {
+	reader, signalMap, err := openSignalReader()
+	if err != nil {
+		return err
+	}
+	reader.Close()
+	signalMap.Close()
+	return nil
+}
+
+// watchSignal retries pumpSignal on failure instead of giving up on
+// out-of-cycle triggers for good -- Start's ticker covers for it either
+// way, so a broken signal path is degraded, not fatal.
+func watchSignal(ctx context.Context) <-chan struct{} {
+	signals := make(chan struct{})
+	go func() {
+		defer close(signals)
+		for ctx.Err() == nil {
+			if err := pumpSignal(ctx, signals); err != nil {
+				log.Printf("gc: nat_map_gc_signal reader failed, reopening in %s: %v", signalRetryDelay, err)
+				select {
+				case <-time.After(signalRetryDelay):
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return signals
+}
+
+// pumpSignal relays nat_map_gc_signal records into signals until ctx is
+// cancelled (nil) or a read fails for any other reason (that error).
+func pumpSignal(ctx context.Context, signals chan<- struct{}) error {
+	reader, signalMap, err := openSignalReader()
+	if err != nil {
+		return err
+	}
+	defer signalMap.Close()
+	defer context.AfterFunc(ctx, func() { reader.Close() })() // unblocks Read() below on shutdown
+
+	for {
+		if _, err := reader.Read(); err != nil {
+			if ctx.Err() != nil {
+				return nil // deliberate shutdown
+			}
+			return err
+		}
+		select {
+		case signals <- struct{}{}:
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }
