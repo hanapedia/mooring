@@ -46,6 +46,14 @@ const (
 	// bpf2go only generates bindings for BTF-visible types, not plain defines).
 	dstKindExtIP uint8 = 1
 	dstKindPodIP uint8 = 2
+
+	// closingNsLongAgo stands in for "marked closing well over
+	// NAT_CLOSING_STALE_NS ago" without needing to read the kernel's own
+	// clock from userspace: bpf_ktime_get_ns() is nanoseconds since boot, so
+	// any value this small is already far more than NAT_CLOSING_STALE_NS
+	// (10s) in the past on any host that's been up longer than that -- true
+	// for every real dev/CI machine this test runs on.
+	closingNsLongAgo uint64 = 1
 )
 
 // beU32 packs an IPv4 address into the little-endian uint32 that
@@ -62,6 +70,15 @@ func beU16(port uint16) uint16 {
 	b := make([]byte, 2)
 	binary.BigEndian.PutUint16(b, port)
 	return binary.LittleEndian.Uint16(b)
+}
+
+// clampToRange mirrors snat_egress.c's clamp_to_range exactly, so a test can
+// predict which port candidate try_alloc_port will probe first for a given
+// pod_port -- used to deliberately seed a collision on that exact candidate.
+func clampToRange(start, end, val uint16) uint16 {
+	n := uint32(end-start) + 1
+	m := uint32(val) * n
+	return start + uint16(m>>16)
 }
 
 type testPrograms struct {
@@ -89,7 +106,8 @@ func newTestPrograms() *testPrograms {
 	revnat := &bpf.RevnatIngressObjects{}
 	ExpectWithOffset(1, revnatSpec.LoadAndAssign(revnat, &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
-			"nat_map":      snat.NatMap,
+			"nat_map_tcp":  snat.NatMapTcp,
+			"nat_map_any":  snat.NatMapAny,
 			"target_cidrs": snat.TargetCidrs,
 		},
 	})).To(Succeed(), "load revnat_ingress objects")

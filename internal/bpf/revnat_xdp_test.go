@@ -39,7 +39,8 @@ func newTestProgramsXDP() *testProgramsXDP {
 	revnat := &bpf.RevnatXdpObjects{}
 	ExpectWithOffset(1, revnatSpec.LoadAndAssign(revnat, &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
-			"nat_map":      snat.NatMap,
+			"nat_map_tcp":  snat.NatMapTcp,
+			"nat_map_any":  snat.NatMapAny,
 			"target_cidrs": snat.TargetCidrs,
 		},
 	})).To(Succeed(), "load revnat_xdp objects")
@@ -100,7 +101,7 @@ var _ = Describe("revnat_xdp", func() {
 			p.addPodNatPorts(podIP, natPort, natPort)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
-			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
+			Expect(p.snat.NatMapTcp.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
 				To(Succeed(), "seed revnat entry")
 
 			in := buildTCP(serverIP, podIP, serverPort, natPort, tcpACK)
@@ -197,7 +198,7 @@ var _ = Describe("revnat_xdp", func() {
 			addPortRangeLookup(p.revnat.PortRangeLookupTcp, extIP, natPort, podIP)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
-			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
+			Expect(p.snat.NatMapTcp.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
 				To(Succeed(), "seed revnat entry")
 
 			in := buildTCP(serverIP, extIP, serverPort, natPort, tcpACK)
