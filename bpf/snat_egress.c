@@ -85,11 +85,9 @@ struct nat_config_key {
 // exists in an entry that was never sampled.
 #define MAX_ENTRY_ATTEMPTS 8
 
-// How long an entry marked closing (see nat_map_val's closing_ns comment in
-// maps.h) can sit unconfirmed before a colliding allocation may reclaim it.
-// Covers unclean ends (crash, dropped FIN/RST) that close-tracking never
-// gets to confirm. TCP only — UDP/ICMP never set closing_ns.
-#define NAT_CLOSING_STALE_NS (10ULL * 1000000000ULL)
+// NAT_CLOSING_STALE_NS now lives in maps.h, next to nat_map_val's
+// closing_ns field -- bpf/nat_gc.c's proactive sweep needs it too, not just
+// this file's lazy collision-triggered reclaim below.
 
 /// Map defs
 struct {
@@ -256,6 +254,9 @@ int snat_egress(struct __sk_buff *skb) {
     if (proto == IPPROTO_TCP)
       nat_map_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
                               pod_port, sv, NAT_ENTRY_SNAT, tcp_fin, tcp_rst);
+    else
+      sv->stale = 0; // touched -- not a GC candidate until the next sweep
+                     // marks it again
   } else {
     // A TCP flow with no existing snat entry must be the pod's own pure
     // SYN -- anything else wasn't initiated by this pod (most likely its
@@ -286,10 +287,19 @@ int snat_egress(struct __sk_buff *skb) {
     if (proto == IPPROTO_TCP && (tcp_fin || tcp_rst))
       closing_ns = bpf_ktime_get_ns();
 
-    nat_map_update_snat(pod_ip, server_ip, pod_port, server_port, proto, ext_ip,
-                        nat_port, closing_ns);
-    nat_map_update_revnat(server_ip, pod_ip, server_port, nat_port, proto,
-                          ext_ip, pod_port, closing_ns);
+    long supdate = nat_map_update_snat(pod_ip, server_ip, pod_port, server_port,
+                                       proto, ext_ip, nat_port, closing_ns);
+    long rupdate =
+        nat_map_update_revnat(server_ip, pod_ip, server_port, nat_port, proto,
+                              ext_ip, pod_port, closing_ns);
+    if (supdate < 0 || rupdate < 0) {
+      // nat_map_tcp/nat_map_any is full -- best-effort nudge to the
+      // userspace GC runnable (internal/gc) for an out-of-cycle sweep; see
+      // nat_map_gc_signal's comment in maps.h. Ignore bpf_ringbuf_output's
+      // own failure (ring full just means a sweep is already pending).
+      __u8 sig = proto;
+      bpf_ringbuf_output(&nat_map_gc_signal, &sig, sizeof(sig), 0);
+    }
   }
 
   iph->saddr = ext_ip;

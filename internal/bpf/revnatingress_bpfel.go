@@ -57,6 +57,7 @@ type RevnatIngressTargetCidrVal struct {
 const (
 	RevnatIngressMapDstKind             = "dst_kind"
 	RevnatIngressMapNatMapAny           = "nat_map_any"
+	RevnatIngressMapNatMapGcSignal      = "nat_map_gc_signal"
 	RevnatIngressMapNatMapTcp           = "nat_map_tcp"
 	RevnatIngressMapPodNatPorts         = "pod_nat_ports"
 	RevnatIngressMapPortRangeInner      = "port_range_inner"
@@ -118,6 +119,7 @@ type RevnatIngressProgramSpecs struct {
 type RevnatIngressMapSpecs struct {
 	DstKind             *ebpf.MapSpec `ebpf:"dst_kind"`
 	NatMapAny           *ebpf.MapSpec `ebpf:"nat_map_any"`
+	NatMapGcSignal      *ebpf.MapSpec `ebpf:"nat_map_gc_signal"`
 	NatMapTcp           *ebpf.MapSpec `ebpf:"nat_map_tcp"`
 	PodNatPorts         *ebpf.MapSpec `ebpf:"pod_nat_ports"`
 	PortRangeInner      *ebpf.MapSpec `ebpf:"port_range_inner"`
@@ -154,6 +156,7 @@ func (o *RevnatIngressObjects) Close() error {
 type RevnatIngressMaps struct {
 	DstKind             *ebpf.Map `ebpf:"dst_kind"`
 	NatMapAny           *ebpf.Map `ebpf:"nat_map_any"`
+	NatMapGcSignal      *ebpf.Map `ebpf:"nat_map_gc_signal"`
 	NatMapTcp           *ebpf.Map `ebpf:"nat_map_tcp"`
 	PodNatPorts         *ebpf.Map `ebpf:"pod_nat_ports"`
 	PortRangeInner      *ebpf.Map `ebpf:"port_range_inner"`
@@ -167,6 +170,7 @@ func (m *RevnatIngressMaps) Close() error {
 	return _RevnatIngressClose(
 		m.DstKind,
 		m.NatMapAny,
+		m.NatMapGcSignal,
 		m.NatMapTcp,
 		m.PodNatPorts,
 		m.PortRangeInner,

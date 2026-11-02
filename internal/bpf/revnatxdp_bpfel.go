@@ -57,6 +57,7 @@ type RevnatXdpTargetCidrVal struct {
 const (
 	RevnatXdpMapDstKind             = "dst_kind"
 	RevnatXdpMapNatMapAny           = "nat_map_any"
+	RevnatXdpMapNatMapGcSignal      = "nat_map_gc_signal"
 	RevnatXdpMapNatMapTcp           = "nat_map_tcp"
 	RevnatXdpMapPodNatPorts         = "pod_nat_ports"
 	RevnatXdpMapPortRangeInner      = "port_range_inner"
@@ -118,6 +119,7 @@ type RevnatXdpProgramSpecs struct {
 type RevnatXdpMapSpecs struct {
 	DstKind             *ebpf.MapSpec `ebpf:"dst_kind"`
 	NatMapAny           *ebpf.MapSpec `ebpf:"nat_map_any"`
+	NatMapGcSignal      *ebpf.MapSpec `ebpf:"nat_map_gc_signal"`
 	NatMapTcp           *ebpf.MapSpec `ebpf:"nat_map_tcp"`
 	PodNatPorts         *ebpf.MapSpec `ebpf:"pod_nat_ports"`
 	PortRangeInner      *ebpf.MapSpec `ebpf:"port_range_inner"`
@@ -154,6 +156,7 @@ func (o *RevnatXdpObjects) Close() error {
 type RevnatXdpMaps struct {
 	DstKind             *ebpf.Map `ebpf:"dst_kind"`
 	NatMapAny           *ebpf.Map `ebpf:"nat_map_any"`
+	NatMapGcSignal      *ebpf.Map `ebpf:"nat_map_gc_signal"`
 	NatMapTcp           *ebpf.Map `ebpf:"nat_map_tcp"`
 	PodNatPorts         *ebpf.Map `ebpf:"pod_nat_ports"`
 	PortRangeInner      *ebpf.Map `ebpf:"port_range_inner"`
@@ -167,6 +170,7 @@ func (m *RevnatXdpMaps) Close() error {
 	return _RevnatXdpClose(
 		m.DstKind,
 		m.NatMapAny,
+		m.NatMapGcSignal,
 		m.NatMapTcp,
 		m.PodNatPorts,
 		m.PortRangeInner,

@@ -66,11 +66,12 @@ type SnatEgressTargetCidrVal struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	SnatEgressMapNatConfig   = "nat_config"
-	SnatEgressMapNatMapAny   = "nat_map_any"
-	SnatEgressMapNatMapTcp   = "nat_map_tcp"
-	SnatEgressMapTargetCidrs = "target_cidrs"
-	SnatEgressProgSnatEgress = "snat_egress"
+	SnatEgressMapNatConfig      = "nat_config"
+	SnatEgressMapNatMapAny      = "nat_map_any"
+	SnatEgressMapNatMapGcSignal = "nat_map_gc_signal"
+	SnatEgressMapNatMapTcp      = "nat_map_tcp"
+	SnatEgressMapTargetCidrs    = "target_cidrs"
+	SnatEgressProgSnatEgress    = "snat_egress"
 )
 
 // LoadSnatEgress returns the embedded CollectionSpec for SnatEgress.
@@ -122,10 +123,11 @@ type SnatEgressProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SnatEgressMapSpecs struct {
-	NatConfig   *ebpf.MapSpec `ebpf:"nat_config"`
-	NatMapAny   *ebpf.MapSpec `ebpf:"nat_map_any"`
-	NatMapTcp   *ebpf.MapSpec `ebpf:"nat_map_tcp"`
-	TargetCidrs *ebpf.MapSpec `ebpf:"target_cidrs"`
+	NatConfig      *ebpf.MapSpec `ebpf:"nat_config"`
+	NatMapAny      *ebpf.MapSpec `ebpf:"nat_map_any"`
+	NatMapGcSignal *ebpf.MapSpec `ebpf:"nat_map_gc_signal"`
+	NatMapTcp      *ebpf.MapSpec `ebpf:"nat_map_tcp"`
+	TargetCidrs    *ebpf.MapSpec `ebpf:"target_cidrs"`
 }
 
 // SnatEgressVariableSpecs contains global variables before they are loaded into the kernel.
@@ -153,16 +155,18 @@ func (o *SnatEgressObjects) Close() error {
 //
 // It can be passed to LoadSnatEgressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SnatEgressMaps struct {
-	NatConfig   *ebpf.Map `ebpf:"nat_config"`
-	NatMapAny   *ebpf.Map `ebpf:"nat_map_any"`
-	NatMapTcp   *ebpf.Map `ebpf:"nat_map_tcp"`
-	TargetCidrs *ebpf.Map `ebpf:"target_cidrs"`
+	NatConfig      *ebpf.Map `ebpf:"nat_config"`
+	NatMapAny      *ebpf.Map `ebpf:"nat_map_any"`
+	NatMapGcSignal *ebpf.Map `ebpf:"nat_map_gc_signal"`
+	NatMapTcp      *ebpf.Map `ebpf:"nat_map_tcp"`
+	TargetCidrs    *ebpf.Map `ebpf:"target_cidrs"`
 }
 
 func (m *SnatEgressMaps) Close() error {
 	return _SnatEgressClose(
 		m.NatConfig,
 		m.NatMapAny,
+		m.NatMapGcSignal,
 		m.NatMapTcp,
 		m.TargetCidrs,
 	)

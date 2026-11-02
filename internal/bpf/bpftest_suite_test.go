@@ -46,6 +46,14 @@ const (
 	// bpf2go only generates bindings for BTF-visible types, not plain defines).
 	dstKindExtIP uint8 = 1
 	dstKindPodIP uint8 = 2
+
+	// closingNsLongAgo stands in for "marked closing well over
+	// NAT_CLOSING_STALE_NS ago" without needing to read the kernel's own
+	// clock from userspace: bpf_ktime_get_ns() is nanoseconds since boot, so
+	// any value this small is already far more than NAT_CLOSING_STALE_NS
+	// (10s) in the past on any host that's been up longer than that -- true
+	// for every real dev/CI machine this test runs on.
+	closingNsLongAgo uint64 = 1
 )
 
 // beU32 packs an IPv4 address into the little-endian uint32 that

@@ -16,6 +16,7 @@ const (
 	bpffsRoot = "/sys/fs/bpf/mooring"
 	mapsDir   = bpffsRoot + "/maps"
 	linksDir  = bpffsRoot + "/links"
+	progsDir  = bpffsRoot + "/progs"
 )
 
 // AttachMode selects which hook revnat's stage1/stage2 rewrite runs on.
@@ -74,7 +75,7 @@ func Load(iface string, mode AttachMode) (err error) {
 		return fmt.Errorf("interface %q: %w", iface, ifErr)
 	}
 
-	for _, dir := range []string{mapsDir, linksDir} {
+	for _, dir := range []string{mapsDir, linksDir, progsDir} {
 		if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
 			return fmt.Errorf("create bpffs dir %s: %w", dir, mkErr)
 		}
@@ -100,23 +101,25 @@ func Load(iface string, mode AttachMode) (err error) {
 		}
 	}()
 
-	// Load snat_egress. Creates nat_map_tcp, nat_map_any and target_cidrs;
-	// revnat shares them.
+	// Load snat_egress. Creates nat_map_tcp, nat_map_any, nat_map_gc_signal
+	// and target_cidrs; revnat and nat_gc (the periodic GC sweep programs)
+	// share them.
 	snatObjs := &mooringbpf.SnatEgressObjects{}
 	if err := mooringbpf.LoadSnatEgressObjects(snatObjs, nil); err != nil {
 		return fmt.Errorf("load snat_egress: %w", err)
 	}
 	defer snatObjs.Close()
 
-	// Pin maps owned by snat_egress up front so revnat's MapReplacements
-	// below (and moorctl/internal/maps, which resolve everything by pinned
-	// path) have somewhere to find them regardless of which revnat mode
-	// loads next.
+	// Pin maps owned by snat_egress up front so revnat's and nat_gc's
+	// MapReplacements below (and moorctl/internal/maps/internal/gc, which
+	// resolve everything by pinned path) have somewhere to find them
+	// regardless of which revnat mode loads next.
 	for name, m := range map[string]*ebpf.Map{
-		"nat_config":   snatObjs.NatConfig,
-		"nat_map_tcp":  snatObjs.NatMapTcp,
-		"nat_map_any":  snatObjs.NatMapAny,
-		"target_cidrs": snatObjs.TargetCidrs,
+		"nat_config":        snatObjs.NatConfig,
+		"nat_map_tcp":       snatObjs.NatMapTcp,
+		"nat_map_any":       snatObjs.NatMapAny,
+		"nat_map_gc_signal": snatObjs.NatMapGcSignal,
+		"target_cidrs":      snatObjs.TargetCidrs,
 	} {
 		if err := m.Pin(filepath.Join(mapsDir, name)); err != nil {
 			return fmt.Errorf("pin map %s: %w", name, err)
@@ -127,6 +130,10 @@ func Load(iface string, mode AttachMode) (err error) {
 		"nat_map_tcp":  snatObjs.NatMapTcp,
 		"nat_map_any":  snatObjs.NatMapAny,
 		"target_cidrs": snatObjs.TargetCidrs,
+	}
+
+	if err := loadNatGc(natMapReplacements); err != nil {
+		return err
 	}
 
 	// Attach and pin snat_egress → TC egress at head of TCX list so our
@@ -152,6 +159,37 @@ func Load(iface string, mode AttachMode) (err error) {
 	default:
 		return loadRevnatTCX(netIface.Index, natMapReplacements)
 	}
+}
+
+// loadNatGc loads bpf/nat_gc.c (the periodic GC sweep programs for
+// nat_map_tcp/nat_map_any, see bpf/headers/maps.h), sharing those two maps
+// (and target_cidrs, which nat_gc.c pulls in transitively via maps.h but
+// never touches) with snat_egress via mapReplacements, and pins its two
+// SEC("syscall") programs under progsDir for internal/gc to invoke via
+// Program.Run. Unlike revnat, nat_gc has no link to attach -- its programs
+// are never attached to a hook, only run on demand.
+func loadNatGc(mapReplacements map[string]*ebpf.Map) error {
+	spec, err := mooringbpf.LoadNatGc()
+	if err != nil {
+		return fmt.Errorf("load nat_gc spec: %w", err)
+	}
+	objs := &mooringbpf.NatGcObjects{}
+	if err := spec.LoadAndAssign(objs, &ebpf.CollectionOptions{
+		MapReplacements: mapReplacements,
+	}); err != nil {
+		return fmt.Errorf("load nat_gc: %w", err)
+	}
+	defer objs.Close()
+
+	for name, p := range map[string]*ebpf.Program{
+		"gc_nat_map_tcp": objs.GcNatMapTcp,
+		"gc_nat_map_any": objs.GcNatMapAny,
+	} {
+		if err := p.Pin(filepath.Join(progsDir, name)); err != nil {
+			return fmt.Errorf("pin prog %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func loadRevnatTCX(ifindex int, mapReplacements map[string]*ebpf.Map) error {

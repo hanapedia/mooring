@@ -2,9 +2,11 @@ package main
 
 import (
 	"os"
+	"time"
 
 	v1alpha1 "github.com/hanapedia/mooring/api/v1alpha1"
 	"github.com/hanapedia/mooring/internal/controller/daemon"
+	"github.com/hanapedia/mooring/internal/gc"
 	"github.com/hanapedia/mooring/internal/loader"
 	"github.com/hanapedia/mooring/internal/routing/bgp"
 	corev1 "k8s.io/api/core/v1"
@@ -46,6 +48,16 @@ func main() {
 	attachMode := loader.AttachMode(os.Getenv("REVNAT_ATTACH_MODE"))
 	if attachMode == "" {
 		attachMode = loader.AttachModeTCX
+	}
+
+	gcPeriod := gc.DefaultPeriod
+	if v := os.Getenv("MOORING_NAT_GC_INTERVAL"); v != "" {
+		parsed, parseErr := time.ParseDuration(v)
+		if parseErr != nil {
+			setupLog.Error(parseErr, "invalid MOORING_NAT_GC_INTERVAL")
+			os.Exit(1)
+		}
+		gcPeriod = parsed
 	}
 
 	bgpCfg, err := bgp.FromEnv()
@@ -102,6 +114,11 @@ func main() {
 
 	if err = mgr.Add(speaker); err != nil {
 		setupLog.Error(err, "unable to register BGP speaker")
+		os.Exit(1)
+	}
+
+	if err = mgr.Add(&gc.Runnable{Period: gcPeriod}); err != nil {
+		setupLog.Error(err, "unable to register NAT map GC runnable")
 		os.Exit(1)
 	}
 

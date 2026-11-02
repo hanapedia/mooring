@@ -10,11 +10,10 @@ struct lpm_key {
 
 // nat_map_tcp/nat_map_any together hold both the forward (snat) and reverse
 // (revnat) direction of every tracked connection, disambiguated by `kind`,
-// split by protocol so each can run its own capacity-management policy
-// separately: nat_map_tcp for TCP, nat_map_any for UDP+ICMP (like Cilium's
-// conntrack split, minus the v4/v6 axis mooring doesn't have). Each live
-// connection occupies exactly two entries, one per map depending on its
-// protocol:
+// split by protocol so each can run its own GC policy (bpf/nat_gc.c):
+// nat_map_tcp for TCP, nat_map_any for UDP+ICMP (like Cilium's conntrack
+// split, minus the v4/v6 axis mooring doesn't have). Each live connection
+// occupies exactly two entries, one per map depending on its protocol:
 //
 // snat entry:
 //   key   {pod_ip, pod_port, server_ip, server_port, proto, SNAT}
@@ -29,7 +28,9 @@ struct lpm_key {
 // restore the original pod port, and looks up/updates the paired snat entry
 // for connection tracking on the server->pod direction. Both entries for a
 // connection are always kept in sync -- see snat_egress.c and
-// revnat_ingress.c for the mark/confirm/reclaim logic.
+// revnat_ingress.c for the mark/confirm/reclaim logic, and bpf/nat_gc.c for
+// the periodic sweep that replaces LRU eviction as the capacity-reclaim
+// mechanism.
 //
 // `kind` exists solely so the two entry shapes can never collide: without it,
 // a snat key and a revnat key draw from the same (ip, port, ip, port, proto)
@@ -55,25 +56,40 @@ struct nat_map_key {
 struct nat_map_val {
   __be32 nat_ip;
   __be16 port; // nat_port for a snat entry, pod_port for a revnat entry
-  // 0 = not closing. Else bpf_ktime_get_ns() at the moment THIS entry's own
-  // direction (pod-side for a snat entry, server-side for a revnat entry)
-  // most recently showed a FIN or RST with no resumed ordinary traffic
-  // since. Set only from traffic actually seen in this entry's own
-  // direction -- never mirrored from the peer entry; see
-  // nat_map_track_tcp_close for the deletion rule this enables. Also
-  // doubles as the staleness timestamp for the allocator's reclaim check
-  // (snat_egress.c's try_alloc_port). UDP/ICMP never set this, so they're
-  // never reclaimed that way.
-  __u64 closing_ns;
+  union {
+    // nat_map_tcp only. 0 = not closing. Else bpf_ktime_get_ns() at the
+    // moment THIS entry's own direction (pod-side for a snat entry,
+    // server-side for a revnat entry) most recently showed a FIN or RST
+    // with no resumed ordinary traffic since. Set only from traffic
+    // actually seen in this entry's own direction -- never mirrored from
+    // the peer entry; see nat_map_track_tcp_close for the deletion rule
+    // this enables. Also doubles as the staleness timestamp for the
+    // allocator's lazy reclaim check (snat_egress.c's try_alloc_port) and
+    // for bpf/nat_gc.c's proactive sweep.
+    __u64 closing_ns;
+    // nat_map_any only. 0 = touched since GC's last sweep, 1 = marked
+    // stale by GC (bpf/nat_gc.c), due for deletion next sweep unless the
+    // datapath clears it back to 0 first on a hit (snat_egress.c's reuse
+    // branch, revnat_core.h's do_port_revnat).
+    __u8 stale;
+  };
 };
+
+// How long a TCP entry marked closing can sit unconfirmed before it may be
+// reclaimed -- either lazily, by a colliding allocation (snat_egress.c's
+// try_alloc_port), or proactively, by the next GC sweep (bpf/nat_gc.c).
+// Covers unclean ends (crash, dropped FIN/RST) that close-tracking never
+// gets to confirm. TCP only -- UDP/ICMP use the `stale` generation marker
+// above instead, with no timestamp.
+#define NAT_CLOSING_STALE_NS (10ULL * 1000000000ULL)
 
 // max_entries = 65536 each, matching this map's share of the old combined
 // nat_map's 131072 (2x65536) capacity -- see nat_map_lookup_snat/revnat
 // below for why both maps share one value type despite the split. Plain
-// BPF_MAP_TYPE_HASH, not LRU: nat_map_any no longer has anything evicting
-// idle entries on its behalf now that LRU is gone, so a full map simply
-// rejects new inserts rather than silently evicting something that may
-// still be live.
+// BPF_MAP_TYPE_HASH, not LRU: a full map now rejects new entries (signaling
+// nat_map_gc_signal below) instead of silently evicting something that may
+// still be live, and bpf/nat_gc.c's periodic sweep is what's actually
+// responsible for keeping each map below capacity.
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 65536);
@@ -87,6 +103,18 @@ struct {
   __type(key, struct nat_map_key);
   __type(value, struct nat_map_val);
 } nat_map_any SEC(".maps");
+
+// Best-effort signal from snat_egress.c's allocation path to the userspace
+// GC runnable (internal/gc, cmd/daemon's GCRunnable): nat_map_tcp or
+// nat_map_any just rejected an insert because it's full, so trigger an
+// out-of-cycle sweep instead of waiting for the next periodic one. A
+// dropped event (ring full, GC not running yet) just means the next
+// periodic sweep catches it instead -- this is a latency optimization, not
+// a correctness dependency.
+struct {
+  __uint(type, BPF_MAP_TYPE_RINGBUF);
+  __uint(max_entries, 4096);
+} nat_map_gc_signal SEC(".maps");
 
 // Named wrappers around nat_map_{tcp,any}'s key (and, for update, value)
 // construction, one pair per entry kind -- so a call site reads as what
