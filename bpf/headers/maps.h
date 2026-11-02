@@ -52,32 +52,35 @@ struct nat_map_key {
 // not two separate per-map structs, so the proto-dispatch in
 // nat_map_lookup_snat/revnat below (choosing which map to hit at runtime)
 // type-checks: the verifier only accepts merging the two maps' pointer types
-// after a runtime branch if their value type is identical.
+// after a runtime branch if their value size is identical, and this is the
+// simplest way to guarantee that.
 struct nat_map_val {
   __be32 nat_ip;
   __be16 port; // nat_port for a snat entry, pod_port for a revnat entry
-  union {
-    // nat_map_tcp only. 0 = not closing. Else bpf_ktime_get_ns() at the
-    // moment THIS entry's own direction (pod-side for a snat entry,
-    // server-side for a revnat entry) most recently showed a FIN or RST
-    // with no resumed ordinary traffic since. Set only from traffic
-    // actually seen in this entry's own direction -- never mirrored from
-    // the peer entry; see nat_map_track_tcp_close for the deletion rule
-    // this enables. Also doubles as the staleness timestamp bpf/nat_gc.c's
-    // sweep reclaims by.
-    __u64 closing_ns;
-    // nat_map_any only. 0 = touched since GC's last sweep, 1 = marked
-    // stale by GC (bpf/nat_gc.c), due for deletion next sweep unless the
-    // datapath clears it back to 0 first on a hit (snat_egress.c's reuse
-    // branch, revnat_core.h's do_port_revnat).
-    __u8 stale;
-  };
+  // nat_map_tcp: 0 = not closing. Else bpf_ktime_get_ns() at the moment
+  // THIS entry's own direction (pod-side for a snat entry, server-side for
+  // a revnat entry) most recently showed a FIN or RST with no resumed
+  // ordinary traffic since. Set only from traffic actually seen in this
+  // entry's own direction -- never mirrored from the peer entry; see
+  // nat_map_track_tcp_close for the deletion rule this enables, and
+  // NAT_CLOSING_STALE_NS for the reclaim threshold bpf/nat_gc.c applies.
+  //
+  // nat_map_any: 0 = touched since GC's last sweep. Else the sweep
+  // (bpf/nat_gc.c) that found it already 0 and marked it, due for deletion
+  // next sweep unless the datapath clears it back to 0 first on a hit
+  // (snat_egress.c's reuse branch, revnat_core.h's do_port_revnat) -- a
+  // plain zero-write, deliberately not a fresh timestamp, so a touch costs
+  // no clock read. The exact marked value is whatever bpf_nat_gc.c's sweep
+  // happened to be using as "now" (cheap to carry since that's already
+  // computed once per sweep); nothing currently reads it as a precise age.
+  __u64 closing_ns;
 };
 
 // How long a TCP entry marked closing can sit unconfirmed before bpf/nat_gc.c's
 // sweep reclaims it. Covers unclean ends (crash, dropped FIN/RST) that
-// close-tracking never gets to confirm. TCP only -- UDP/ICMP use the
-// `stale` generation marker above instead, with no timestamp.
+// close-tracking never gets to confirm. TCP only -- nat_map_any's
+// closing_ns is a generation marker, not a timestamp used for an age
+// check (see nat_map_val's comment), so there's no equivalent constant for it.
 #define NAT_CLOSING_STALE_NS (10ULL * 1000000000ULL)
 
 // max_entries = 65536 each, matching this map's share of the old combined

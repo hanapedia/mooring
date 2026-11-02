@@ -133,7 +133,7 @@ do_port_revnat(__ctx_buff *ctx, __be32 server_ip, __be32 pod_ip,
     nat_map_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
                            pod_port, nv, NAT_ENTRY_REVNAT, tcp_fin, tcp_rst);
   else
-    nv->stale = 0; // touched -- not a GC candidate until the next sweep marks it again
+    nv->closing_ns = 0; // touched -- not a GC candidate until the next sweep marks it again
 
   void *data = ctx_data(ctx);
   void *data_end = ctx_data_end(ctx);

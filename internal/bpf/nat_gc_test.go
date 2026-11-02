@@ -165,18 +165,9 @@ var _ = Describe("nat_gc", func() {
 			key = natMapKey(podIP, serverIP, podPort, serverPort, protoUDP, natEntrySNAT)
 		})
 
-		// ClosingNs's low byte is nat_map_val's `stale` union member for
-		// nat_map_any entries (see bpf/headers/maps.h) -- bpf2go flattens the
-		// C union to its first member's name/width, so writing a byte there
-		// from Go means writing ClosingNs's low byte.
-		const (
-			staleFresh uint64 = 0
-			staleMark  uint64 = 1
-		)
-
-		It("marks a fresh entry stale on the first sweep, then deletes it on the second if still untouched", func() {
+		It("marks a fresh entry on the first sweep, then deletes it on the second if still untouched", func() {
 			Expect(p.snat.NatMapAny.Put(key, bpf.SnatEgressNatMapVal{
-				NatIp: beU32(extIP), Port: beU16(extPort), ClosingNs: staleFresh,
+				NatIp: beU32(extIP), Port: beU16(extPort), ClosingNs: 0,
 			})).To(Succeed(), "seed udp entry")
 
 			first := p.runAny()
@@ -184,30 +175,30 @@ var _ = Describe("nat_gc", func() {
 
 			var val bpf.SnatEgressNatMapVal
 			Expect(p.snat.NatMapAny.Lookup(key, &val)).To(Succeed(), "entry must still exist after being marked")
-			Expect(val.ClosingNs).To(Equal(staleMark), "entry should now be marked stale")
+			Expect(val.ClosingNs).NotTo(BeZero(), "entry should now be marked (closing_ns set to the sweep's own 'now')")
 
 			second := p.runAny()
-			Expect(second.Deleted).To(BeNumerically(">=", 1), "an entry still marked stale on the next sweep must be deleted")
+			Expect(second.Deleted).To(BeNumerically(">=", 1), "an entry still marked on the next sweep must be deleted")
 			Expect(p.snat.NatMapAny.Lookup(key, &bpf.SnatEgressNatMapVal{})).
 				To(MatchError(ebpf.ErrKeyNotExist), "entry should be gone after the second sweep")
 		})
 
-		It("survives indefinitely if touched (stale cleared) between sweeps", func() {
+		It("survives indefinitely if touched (closing_ns cleared) between sweeps", func() {
 			Expect(p.snat.NatMapAny.Put(key, bpf.SnatEgressNatMapVal{
-				NatIp: beU32(extIP), Port: beU16(extPort), ClosingNs: staleFresh,
+				NatIp: beU32(extIP), Port: beU16(extPort), ClosingNs: 0,
 			})).To(Succeed(), "seed udp entry")
 
-			p.runAny() // marks it stale
+			p.runAny() // marks it
 
 			// Datapath touch: snat_egress.c's reuse branch / revnat_core.h's
-			// do_port_revnat clear `stale` back to 0 on a hit -- simulated
+			// do_port_revnat clear closing_ns back to 0 on a hit -- simulated
 			// here directly rather than driving a packet, since this test is
 			// about the GC program's own mark/sweep logic, not the datapath
 			// integration (covered separately by snat_egress_test.go /
 			// revnat_ingress_test.go once they exercise UDP/ICMP).
 			Expect(p.snat.NatMapAny.Put(key, bpf.SnatEgressNatMapVal{
-				NatIp: beU32(extIP), Port: beU16(extPort), ClosingNs: staleFresh,
-			})).To(Succeed(), "simulate datapath touch clearing stale")
+				NatIp: beU32(extIP), Port: beU16(extPort), ClosingNs: 0,
+			})).To(Succeed(), "simulate datapath touch clearing the mark")
 
 			second := p.runAny()
 			Expect(second.Deleted).To(BeZero(), "a touched entry must survive the sweep that would otherwise delete it")

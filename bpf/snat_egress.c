@@ -249,8 +249,8 @@ int snat_egress(struct __sk_buff *skb) {
       nat_map_track_tcp_close(server_ip, pod_ip, server_port, nat_port,
                               pod_port, sv, NAT_ENTRY_SNAT, tcp_fin, tcp_rst);
     else
-      sv->stale = 0; // touched -- not a GC candidate until the next sweep
-                     // marks it again
+      sv->closing_ns = 0; // touched -- not a GC candidate until the next
+                          // sweep marks it again
   } else {
     // A TCP flow with no existing snat entry must be the pod's own pure
     // SYN -- anything else wasn't initiated by this pod (most likely its
