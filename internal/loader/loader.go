@@ -100,7 +100,8 @@ func Load(iface string, mode AttachMode) (err error) {
 		}
 	}()
 
-	// Load snat_egress. Creates nat_map and target_cidrs; revnat shares them.
+	// Load snat_egress. Creates nat_map_tcp, nat_map_any and target_cidrs;
+	// revnat shares them.
 	snatObjs := &mooringbpf.SnatEgressObjects{}
 	if err := mooringbpf.LoadSnatEgressObjects(snatObjs, nil); err != nil {
 		return fmt.Errorf("load snat_egress: %w", err)
@@ -113,7 +114,8 @@ func Load(iface string, mode AttachMode) (err error) {
 	// loads next.
 	for name, m := range map[string]*ebpf.Map{
 		"nat_config":   snatObjs.NatConfig,
-		"nat_map":      snatObjs.NatMap,
+		"nat_map_tcp":  snatObjs.NatMapTcp,
+		"nat_map_any":  snatObjs.NatMapAny,
 		"target_cidrs": snatObjs.TargetCidrs,
 	} {
 		if err := m.Pin(filepath.Join(mapsDir, name)); err != nil {
@@ -121,8 +123,9 @@ func Load(iface string, mode AttachMode) (err error) {
 		}
 	}
 
-	revnatMapReplacements := map[string]*ebpf.Map{
-		"nat_map":      snatObjs.NatMap,
+	natMapReplacements := map[string]*ebpf.Map{
+		"nat_map_tcp":  snatObjs.NatMapTcp,
+		"nat_map_any":  snatObjs.NatMapAny,
 		"target_cidrs": snatObjs.TargetCidrs,
 	}
 
@@ -145,18 +148,19 @@ func Load(iface string, mode AttachMode) (err error) {
 
 	switch mode {
 	case AttachModeXDP:
-		return loadRevnatXDP(netIface.Index, revnatMapReplacements)
+		return loadRevnatXDP(netIface.Index, natMapReplacements)
 	default:
-		return loadRevnatTCX(netIface.Index, revnatMapReplacements)
+		return loadRevnatTCX(netIface.Index, natMapReplacements)
 	}
 }
 
 func loadRevnatTCX(ifindex int, mapReplacements map[string]*ebpf.Map) error {
-	// injecting the already-created nat_map and target_cidrs so both programs
-	// operate on the same maps. nat_map holds both the forward (snat) and
-	// reverse (revnat) direction of every tracked connection, so revnat needs
-	// it both to resolve the pod port and to mark/confirm/delete the paired
-	// snat entry for connection tracking on the server->pod direction.
+	// injecting the already-created nat_map_tcp/nat_map_any and target_cidrs
+	// so both programs operate on the same maps. Each holds both the forward
+	// (snat) and reverse (revnat) direction of every tracked connection for
+	// its protocol group, so revnat needs them both to resolve the pod port
+	// and to mark/confirm/delete the paired snat entry for connection
+	// tracking on the server->pod direction.
 	spec, err := mooringbpf.LoadRevnatIngress()
 	if err != nil {
 		return fmt.Errorf("load revnat_ingress spec: %w", err)

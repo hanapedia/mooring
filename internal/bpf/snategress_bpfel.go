@@ -67,7 +67,8 @@ type SnatEgressTargetCidrVal struct {
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	SnatEgressMapNatConfig   = "nat_config"
-	SnatEgressMapNatMap      = "nat_map"
+	SnatEgressMapNatMapAny   = "nat_map_any"
+	SnatEgressMapNatMapTcp   = "nat_map_tcp"
 	SnatEgressMapTargetCidrs = "target_cidrs"
 	SnatEgressProgSnatEgress = "snat_egress"
 )
@@ -122,7 +123,8 @@ type SnatEgressProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type SnatEgressMapSpecs struct {
 	NatConfig   *ebpf.MapSpec `ebpf:"nat_config"`
-	NatMap      *ebpf.MapSpec `ebpf:"nat_map"`
+	NatMapAny   *ebpf.MapSpec `ebpf:"nat_map_any"`
+	NatMapTcp   *ebpf.MapSpec `ebpf:"nat_map_tcp"`
 	TargetCidrs *ebpf.MapSpec `ebpf:"target_cidrs"`
 }
 
@@ -152,14 +154,16 @@ func (o *SnatEgressObjects) Close() error {
 // It can be passed to LoadSnatEgressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SnatEgressMaps struct {
 	NatConfig   *ebpf.Map `ebpf:"nat_config"`
-	NatMap      *ebpf.Map `ebpf:"nat_map"`
+	NatMapAny   *ebpf.Map `ebpf:"nat_map_any"`
+	NatMapTcp   *ebpf.Map `ebpf:"nat_map_tcp"`
 	TargetCidrs *ebpf.Map `ebpf:"target_cidrs"`
 }
 
 func (m *SnatEgressMaps) Close() error {
 	return _SnatEgressClose(
 		m.NatConfig,
-		m.NatMap,
+		m.NatMapAny,
+		m.NatMapTcp,
 		m.TargetCidrs,
 	)
 }

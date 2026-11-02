@@ -47,13 +47,13 @@ var _ = Describe("snat_egress", func() {
 			Expect(pseudoHeaderChecksum(extIP, serverIP, protoTCP, l4)).To(BeZero(), "TCP checksum invalid after rewrite")
 
 			var snatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT), &snatVal)).
+			Expect(p.snat.NatMapTcp.Lookup(natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT), &snatVal)).
 				To(Succeed(), "snat entry not recorded")
 			Expect(snatVal.NatIp).To(Equal(beU32(extIP)))
 			Expect(snatVal.Port).To(Equal(beU16(extPort)))
 
 			var revnatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(natMapKey(serverIP, podIP, serverPort, extPort, protoTCP, natEntryREVNAT), &revnatVal)).
+			Expect(p.snat.NatMapTcp.Lookup(natMapKey(serverIP, podIP, serverPort, extPort, protoTCP, natEntryREVNAT), &revnatVal)).
 				To(Succeed(), "revnat entry not recorded")
 			Expect(revnatVal.NatIp).To(Equal(beU32(extIP)))
 			Expect(revnatVal.Port).To(Equal(beU16(podPort)))
@@ -180,11 +180,11 @@ var _ = Describe("snat_egress", func() {
 			runEgress(tcpFIN | tcpACK)
 
 			var snatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
 			Expect(snatVal.ClosingNs).NotTo(BeZero(), "snat entry not marked closing after first FIN")
 
 			var revnatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed(), "revnat entry missing after first FIN")
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &revnatVal)).To(Succeed(), "revnat entry missing after first FIN")
 			Expect(revnatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
 
 			// A second FIN from the SAME (pod) side must NOT delete
@@ -192,9 +192,9 @@ var _ = Describe("snat_egress", func() {
 			// the close.
 			runEgress(tcpFIN | tcpACK)
 
-			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
 				To(Succeed(), "snat entry deleted by a second same-direction FIN -- should require both directions")
-			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
 				To(Succeed(), "revnat entry deleted by a second same-direction FIN -- should require both directions")
 
 			// Now the server side sends a FIN too, via revnat_ingress
@@ -204,9 +204,9 @@ var _ = Describe("snat_egress", func() {
 			_, err := p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: serverFIN, DataOut: make([]byte, len(serverFIN))})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
 				NotTo(Succeed(), "snat entry still present after a FIN from both directions")
-			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
 				NotTo(Succeed(), "revnat entry still present after a FIN from both directions")
 		})
 	})
@@ -232,7 +232,7 @@ var _ = Describe("snat_egress", func() {
 			Expect(ret).To(Equal(tcDrop))
 			Expect(out).To(Equal(in), "a dropped packet must not be rewritten (no pod-IP leak)")
 
-			Expect(p.snat.NatMap.Lookup(natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT), &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT), &bpf.SnatEgressNatMapVal{})).
 				NotTo(Succeed(), "no snat entry should have been allocated for an unsolicited reply")
 		})
 	})

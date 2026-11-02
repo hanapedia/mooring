@@ -36,7 +36,7 @@ var _ = Describe("revnat_ingress", func() {
 			p.addPodNatPorts(podIP, natPort, natPort)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
-			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
+			Expect(p.snat.NatMapTcp.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
 				To(Succeed(), "seed revnat entry")
 
 			in := buildTCP(serverIP, podIP, serverPort, natPort, tcpACK)
@@ -133,7 +133,7 @@ var _ = Describe("revnat_ingress", func() {
 			addPortRangeLookup(p.revnat.PortRangeLookupTcp, extIP, natPort, podIP)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
-			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
+			Expect(p.snat.NatMapTcp.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
 				To(Succeed(), "seed revnat entry")
 
 			in := buildTCP(serverIP, extIP, serverPort, natPort, tcpACK)
@@ -187,9 +187,9 @@ var _ = Describe("revnat_ingress", func() {
 			snatKey := natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT)
 			revnatKey := natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT)
 
-			Expect(p.snat.NatMap.Put(snatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(natPort)})).
+			Expect(p.snat.NatMapTcp.Put(snatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(natPort)})).
 				To(Succeed(), "seed snat entry")
-			Expect(p.snat.NatMap.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
+			Expect(p.snat.NatMapTcp.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
 				To(Succeed(), "seed revnat entry")
 
 			runIngress := func(flags uint8) []byte {
@@ -208,11 +208,11 @@ var _ = Describe("revnat_ingress", func() {
 			Expect(binary.BigEndian.Uint16(l4[2:4])).To(Equal(podPort), "dst port on the marking packet")
 
 			var revnatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed(), "revnat entry missing after first FIN")
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &revnatVal)).To(Succeed(), "revnat entry missing after first FIN")
 			Expect(revnatVal.ClosingNs).NotTo(BeZero(), "revnat entry not marked closing after first FIN")
 
 			var snatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &snatVal)).To(Succeed(), "snat entry missing after first FIN")
 			Expect(snatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
 
 			// A second FIN from the SAME direction (e.g. a retransmit) must
@@ -220,9 +220,9 @@ var _ = Describe("revnat_ingress", func() {
 			// confirm the close.
 			runIngress(tcpFIN | tcpACK)
 
-			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
 				To(Succeed(), "revnat entry deleted by a second same-direction FIN -- should require both directions")
-			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
 				To(Succeed(), "snat entry deleted by a second same-direction FIN -- should require both directions")
 
 			// Now the pod's own side sends a FIN too, via snat_egress
@@ -233,9 +233,9 @@ var _ = Describe("revnat_ingress", func() {
 			_, err := p.snat.SnatEgress.Run(&ebpf.RunOptions{Data: podFIN, DataOut: make([]byte, len(podFIN))})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(p.snat.NatMap.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &bpf.SnatEgressNatMapVal{})).
 				NotTo(Succeed(), "revnat entry still present after a FIN from both directions")
-			Expect(p.snat.NatMap.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &bpf.SnatEgressNatMapVal{})).
 				NotTo(Succeed(), "snat entry still present after a FIN from both directions")
 		})
 
@@ -252,9 +252,9 @@ var _ = Describe("revnat_ingress", func() {
 			snatKey := natMapKey(podIP, serverIP, podPort, serverPort, protoTCP, natEntrySNAT)
 			revnatKey := natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT)
 
-			Expect(p.snat.NatMap.Put(snatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(natPort)})).
+			Expect(p.snat.NatMapTcp.Put(snatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(natPort)})).
 				To(Succeed(), "seed snat entry")
-			Expect(p.snat.NatMap.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
+			Expect(p.snat.NatMapTcp.Put(revnatKey, bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)})).
 				To(Succeed(), "seed revnat entry")
 
 			// An RST from the server side marks the revnat entry closing.
@@ -266,11 +266,11 @@ var _ = Describe("revnat_ingress", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			var revnatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed())
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &revnatVal)).To(Succeed())
 			Expect(revnatVal.ClosingNs).NotTo(BeZero(), "entry not marked closing after RST")
 
 			var snatVal bpf.SnatEgressNatMapVal
-			Expect(p.snat.NatMap.Lookup(snatKey, &snatVal)).To(Succeed())
+			Expect(p.snat.NatMapTcp.Lookup(snatKey, &snatVal)).To(Succeed())
 			Expect(snatVal.ClosingNs).To(BeZero(), "closing_ns must not be mirrored onto the peer entry")
 
 			// Ordinary (non-FIN/RST) traffic from the SAME (server) side --
@@ -280,7 +280,7 @@ var _ = Describe("revnat_ingress", func() {
 			_, err = p.revnat.RevnatIngress.Run(&ebpf.RunOptions{Data: serverData, DataOut: make([]byte, len(serverData))})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(p.snat.NatMap.Lookup(revnatKey, &revnatVal)).To(Succeed())
+			Expect(p.snat.NatMapTcp.Lookup(revnatKey, &revnatVal)).To(Succeed())
 			Expect(revnatVal.ClosingNs).To(BeZero(), "closing mark should clear once the marked side resumes ordinary traffic")
 		})
 	})
@@ -314,7 +314,7 @@ var _ = Describe("revnat_ingress", func() {
 			p.addPodNatPorts(podIP, natPort, natPort)
 
 			revnatVal := bpf.SnatEgressNatMapVal{NatIp: beU32(extIP), Port: beU16(podPort)}
-			Expect(p.snat.NatMap.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
+			Expect(p.snat.NatMapTcp.Put(natMapKey(serverIP, podIP, serverPort, natPort, protoTCP, natEntryREVNAT), revnatVal)).
 				To(Succeed(), "seed revnat entry")
 
 			in := buildTCPWithIHL(serverIP, podIP, serverPort, natPort, tcpACK, ihl, 0)

@@ -89,7 +89,8 @@ func newTestPrograms() *testPrograms {
 	revnat := &bpf.RevnatIngressObjects{}
 	ExpectWithOffset(1, revnatSpec.LoadAndAssign(revnat, &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
-			"nat_map":      snat.NatMap,
+			"nat_map_tcp":  snat.NatMapTcp,
+			"nat_map_any":  snat.NatMapAny,
 			"target_cidrs": snat.TargetCidrs,
 		},
 	})).To(Succeed(), "load revnat_ingress objects")

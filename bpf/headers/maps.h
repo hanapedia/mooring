@@ -8,9 +8,13 @@ struct lpm_key {
   __be32 addr;
 };
 
-// nat_map holds both the forward (snat) and reverse (revnat) direction of
-// every tracked connection, in a single map, disambiguated by `kind`. Each
-// live connection occupies exactly two entries:
+// nat_map_tcp/nat_map_any together hold both the forward (snat) and reverse
+// (revnat) direction of every tracked connection, disambiguated by `kind`,
+// split by protocol so each can run its own capacity-management policy
+// separately: nat_map_tcp for TCP, nat_map_any for UDP+ICMP (like Cilium's
+// conntrack split, minus the v4/v6 axis mooring doesn't have). Each live
+// connection occupies exactly two entries, one per map depending on its
+// protocol:
 //
 // snat entry:
 //   key   {pod_ip, pod_port, server_ip, server_port, proto, SNAT}
@@ -19,7 +23,7 @@ struct lpm_key {
 //   key   {server_ip, server_port, pod_ip, nat_port, proto, REVNAT}
 //   value {ext_ip, pod_port}
 //
-// snat_egress owns both: it looks up/writes the snat entry to reuse or
+// snat_egress owns both maps: it looks up/writes the snat entry to reuse or
 // allocate a port, and looks up (as part of allocation's collision check) and
 // writes the paired revnat entry. revnat_ingress looks up the revnat entry to
 // restore the original pod port, and looks up/updates the paired snat entry
@@ -43,6 +47,11 @@ struct nat_map_key {
   __u8 kind;
 };
 
+// One value shape shared by both nat_map_tcp and nat_map_any -- deliberately
+// not two separate per-map structs, so the proto-dispatch in
+// nat_map_lookup_snat/revnat below (choosing which map to hit at runtime)
+// type-checks: the verifier only accepts merging the two maps' pointer types
+// after a runtime branch if their value type is identical.
 struct nat_map_val {
   __be32 nat_ip;
   __be16 port; // nat_port for a snat entry, pod_port for a revnat entry
@@ -58,27 +67,38 @@ struct nat_map_val {
   __u64 closing_ns;
 };
 
-// max_entries = 2x the target concurrent-connection count: every connection
-// holds exactly one snat and one revnat entry. 131072 (2x65536) matches
-// today's real effective ceiling -- the old per-protocol nat_table_tcp/udp/icmp
-// maps had 3x65536 combined capacity, but the (never protocol-split)
-// outbound_sessions map was already capping total connections at 65536
-// regardless of protocol mix, so that combined capacity was never actually
-// reachable.
+// max_entries = 65536 each, matching this map's share of the old combined
+// nat_map's 131072 (2x65536) capacity -- see nat_map_lookup_snat/revnat
+// below for why both maps share one value type despite the split. Plain
+// BPF_MAP_TYPE_HASH, not LRU: nat_map_any no longer has anything evicting
+// idle entries on its behalf now that LRU is gone, so a full map simply
+// rejects new inserts rather than silently evicting something that may
+// still be live.
 struct {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 131072);
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 65536);
   __type(key, struct nat_map_key);
   __type(value, struct nat_map_val);
-} nat_map SEC(".maps");
+} nat_map_tcp SEC(".maps");
 
-// Named wrappers around nat_map's key (and, for update, value) construction,
-// one pair per entry kind -- so a call site reads as what it's doing (look
-// up the snat entry for this flow) rather than a six-field key-struct
-// literal sitting next to a bpf_map_* call. The key layout above (which
-// field is ip_a vs ip_b, what `kind` means) lives here, in exactly one
-// place, instead of being re-spelled at every call site in revnat_core.h
-// and snat_egress.c.
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 65536);
+  __type(key, struct nat_map_key);
+  __type(value, struct nat_map_val);
+} nat_map_any SEC(".maps");
+
+// Named wrappers around nat_map_{tcp,any}'s key (and, for update, value)
+// construction, one pair per entry kind -- so a call site reads as what
+// it's doing (look up the snat entry for this flow) rather than a
+// six-field key-struct literal sitting next to a bpf_map_* call, and so the
+// proto -> map dispatch lives in exactly one place instead of being
+// re-spelled at every call site in revnat_core.h and snat_egress.c (both of
+// which already have `proto` in hand at every call site).
+static __always_inline void *nat_map_for_proto(__u8 proto) {
+  return proto == IPPROTO_TCP ? (void *)&nat_map_tcp : (void *)&nat_map_any;
+}
+
 static __always_inline struct nat_map_val *
 nat_map_lookup_snat(__be32 pod_ip, __be32 server_ip, __be16 pod_port,
                     __be16 server_port, __u8 proto) {
@@ -90,7 +110,7 @@ nat_map_lookup_snat(__be32 pod_ip, __be32 server_ip, __be16 pod_port,
       .proto = proto,
       .kind = NAT_ENTRY_SNAT,
   };
-  return bpf_map_lookup_elem(&nat_map, &key);
+  return bpf_map_lookup_elem(nat_map_for_proto(proto), &key);
 }
 
 static __always_inline struct nat_map_val *
@@ -104,7 +124,7 @@ nat_map_lookup_revnat(__be32 server_ip, __be32 pod_ip, __be16 server_port,
       .proto = proto,
       .kind = NAT_ENTRY_REVNAT,
   };
-  return bpf_map_lookup_elem(&nat_map, &key);
+  return bpf_map_lookup_elem(nat_map_for_proto(proto), &key);
 }
 
 static __always_inline long nat_map_update_snat(__be32 pod_ip, __be32 server_ip,
@@ -122,7 +142,7 @@ static __always_inline long nat_map_update_snat(__be32 pod_ip, __be32 server_ip,
   };
   struct nat_map_val val = {
       .nat_ip = nat_ip, .port = nat_port, .closing_ns = closing_ns};
-  return bpf_map_update_elem(&nat_map, &key, &val, BPF_ANY);
+  return bpf_map_update_elem(nat_map_for_proto(proto), &key, &val, BPF_ANY);
 }
 
 static __always_inline long
@@ -139,7 +159,7 @@ nat_map_update_revnat(__be32 server_ip, __be32 pod_ip, __be16 server_port,
   };
   struct nat_map_val val = {
       .nat_ip = nat_ip, .port = pod_port, .closing_ns = closing_ns};
-  return bpf_map_update_elem(&nat_map, &key, &val, BPF_ANY);
+  return bpf_map_update_elem(nat_map_for_proto(proto), &key, &val, BPF_ANY);
 }
 
 static __always_inline long nat_map_delete_snat(__be32 pod_ip, __be32 server_ip,
@@ -154,7 +174,7 @@ static __always_inline long nat_map_delete_snat(__be32 pod_ip, __be32 server_ip,
       .proto = proto,
       .kind = NAT_ENTRY_SNAT,
   };
-  return bpf_map_delete_elem(&nat_map, &key);
+  return bpf_map_delete_elem(nat_map_for_proto(proto), &key);
 }
 
 static __always_inline long nat_map_delete_revnat(__be32 server_ip,
@@ -169,10 +189,10 @@ static __always_inline long nat_map_delete_revnat(__be32 server_ip,
       .proto = proto,
       .kind = NAT_ENTRY_REVNAT,
   };
-  return bpf_map_delete_elem(&nat_map, &key);
+  return bpf_map_delete_elem(nat_map_for_proto(proto), &key);
 }
 
-// Shared TCP close state machine for nat_map -- used by do_port_revnat
+// Shared TCP close state machine for nat_map_tcp -- used by do_port_revnat
 // (revnat_core.h, own_kind = NAT_ENTRY_REVNAT, own = the revnat entry nv)
 // and by snat_egress.c (own_kind = NAT_ENTRY_SNAT, own = the snat entry sv).
 // server_ip, pod_ip, server_port, nat_port and pod_port together determine
